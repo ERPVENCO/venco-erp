@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
 import Inventario from './Inventario'
 import MateriaPrima from './MateriaPrima'
+import Clientes from './Clientes'
 import ProductoTerminado from './ProductoTerminado'
 import Login from './Login'
 
@@ -121,7 +122,7 @@ export default function App() {
         {modulo === 'materia_prima' && <MateriaPrima />}
         {modulo === 'producto_terminado' && <ProductoTerminado />}
         {modulo === 'ventas' && <div style={{ fontSize: 20, fontWeight: 700 }}>🛒 Ventas — próximamente</div>}
-        {modulo === 'clientes' && <div style={{ fontSize: 20, fontWeight: 700 }}>👥 Clientes — próximamente</div>}
+        {modulo === 'clientes' && <Clientes />}
         {modulo === 'manufactura' && <div style={{ fontSize: 20, fontWeight: 700 }}>🏭 Manufactura — próximamente</div>}
         {modulo === 'compras' && <div style={{ fontSize: 20, fontWeight: 700 }}>🚛 Compras — próximamente</div>}
         {modulo === 'finanzas' && <div style={{ fontSize: 20, fontWeight: 700 }}>💰 Finanzas — próximamente</div>}
