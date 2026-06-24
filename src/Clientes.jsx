@@ -7,6 +7,7 @@ export default function Clientes() {
   const [mostrarForm, setMostrarForm] = useState(false)
   const [filtroTipo, setFiltroTipo] = useState('todos')
   const [guardando, setGuardando] = useState(false)
+  const [clienteDetalle, setClienteDetalle] = useState(null)
   const [nuevo, setNuevo] = useState({
     tipo_cliente: 'registrado',
     empresa: '', encargado: '', cedula_nit: '',
@@ -95,6 +96,30 @@ export default function Clientes() {
 
   return (
     <div>
+      {clienteDetalle && (
+        <div onClick={() => setClienteDetalle(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 420, maxWidth: '95vw', boxShadow: '0 8px 28px rgba(0,0,0,0.15)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>{clienteDetalle.empresa}</div>
+              <span onClick={() => setClienteDetalle(null)} style={{ cursor: 'pointer', fontSize: 20, color: '#9A8E85' }}>×</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÓDIGO</span><br/>{clienteDetalle.codigo_manual}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>TIPO</span><br/>{clienteDetalle.tipo_cliente === 'registrado' ? 'Cliente Registrado' : 'Cliente Temporal'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>ENCARGADO</span><br/>{clienteDetalle.encargado || '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÉDULA / NIT</span><br/>{clienteDetalle.cedula_nit || '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>TELÉFONO</span><br/>{clienteDetalle.telefono}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>DIRECCIÓN</span><br/>{clienteDetalle.direccion || '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CUMPLEAÑOS</span><br/>{clienteDetalle.cumpleanos || '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>LÍMITE DE CRÉDITO</span><br/>{clienteDetalle.limite_credito ? '$' + clienteDetalle.limite_credito.toLocaleString() : '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>DÍAS DE CRÉDITO</span><br/>{clienteDetalle.dias_credito || '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>SALDO PENDIENTE</span><br/>${(clienteDetalle.saldo_pendiente || 0).toLocaleString()}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>INFORMACIÓN ADICIONAL</span><br/>{clienteDetalle.informacion_adicional || '—'}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700 }}>👥 Clientes</div>
@@ -107,7 +132,6 @@ export default function Clientes() {
         </button>
       </div>
 
-      {/* Filtros */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
         {['todos', 'registrado', 'temporal'].map(t => (
           <button key={t} onClick={() => setFiltroTipo(t)} style={{
@@ -218,7 +242,7 @@ export default function Clientes() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ background: '#F4F1ED' }}>
-                {['#','Empresa','Encargado','Teléfono','Tipo','Crédito','Saldo','Acciones'].map(h => (
+                {['#','Empresa','Encargado','Dirección','Teléfono','Tipo','Crédito','Saldo','Detalle','Eliminar'].map(h => (
                   <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
                 ))}
               </tr>
@@ -227,8 +251,12 @@ export default function Clientes() {
               {clientesFiltrados.map(c => (
                 <tr key={c.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
                   <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600 }}>{c.codigo_manual}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{c.empresa}<br/><span style={{ fontSize: 11, color: '#9A8E85', fontWeight: 400 }}>{c.cedula_nit}</span></td>
+                  <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>
+                    {c.empresa}<br/>
+                    <span style={{ fontSize: 11, color: '#9A8E85', fontWeight: 400 }}>{c.cedula_nit}</span>
+                  </td>
                   <td style={{ padding: '11px 16px', fontSize: 13 }}>{c.encargado || '—'}</td>
+                  <td style={{ padding: '11px 16px', fontSize: 13 }}>{c.direccion || '—'}</td>
                   <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{c.telefono}</td>
                   <td style={{ padding: '11px 16px' }}>
                     <span style={{ background: c.tipo_cliente === 'registrado' ? '#E8F0FB' : '#FEF3DC', color: c.tipo_cliente === 'registrado' ? '#1A5FA8' : '#C07D00', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600 }}>
@@ -238,9 +266,14 @@ export default function Clientes() {
                   <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{c.limite_credito ? '$' + c.limite_credito.toLocaleString() : '—'}</td>
                   <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', color: c.saldo_pendiente > 0 ? '#B22222' : '#1A9156' }}>${(c.saldo_pendiente || 0).toLocaleString()}</td>
                   <td style={{ padding: '8px 16px' }}>
-                    <button onClick={() => eliminar(c)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                      🗑️
-                    </button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button onClick={() => setClienteDetalle(c)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                        👁️ VER
+                      </button>
+                      <button onClick={() => eliminar(c)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                        🗑️
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

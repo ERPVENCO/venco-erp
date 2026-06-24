@@ -3,7 +3,9 @@ import { supabase } from './supabase'
 import Inventario from './Inventario'
 import MateriaPrima from './MateriaPrima'
 import Clientes from './Clientes'
+import Vendedores from './Vendedores'
 import ProductoTerminado from './ProductoTerminado'
+import Ventas from './Ventas'
 import Login from './Login'
 
 export default function App() {
@@ -43,6 +45,7 @@ export default function App() {
     { separador: 'FINANZAS' },
     { id: 'finanzas', nombre: 'Finanzas', icon: '💰' },
     { id: 'empleados', nombre: 'Empleados', icon: '👤' },
+    { id: 'vendedores', nombre: 'Vendedores', icon: '🧑‍💼' },
     { separador: 'REPORTES' },
     { id: 'reportes', nombre: 'Reportes', icon: '📊' },
   ]
@@ -121,12 +124,13 @@ export default function App() {
 
         {modulo === 'materia_prima' && <MateriaPrima />}
         {modulo === 'producto_terminado' && <ProductoTerminado />}
-        {modulo === 'ventas' && <div style={{ fontSize: 20, fontWeight: 700 }}>🛒 Ventas — próximamente</div>}
+        {modulo === 'ventas' && <Ventas />}
         {modulo === 'clientes' && <Clientes />}
         {modulo === 'manufactura' && <div style={{ fontSize: 20, fontWeight: 700 }}>🏭 Manufactura — próximamente</div>}
         {modulo === 'compras' && <div style={{ fontSize: 20, fontWeight: 700 }}>🚛 Compras — próximamente</div>}
         {modulo === 'finanzas' && <div style={{ fontSize: 20, fontWeight: 700 }}>💰 Finanzas — próximamente</div>}
         {modulo === 'empleados' && <div style={{ fontSize: 20, fontWeight: 700 }}>👤 Empleados — próximamente</div>}
+        {modulo === 'vendedores' && <Vendedores />}
         {modulo === 'reportes' && <div style={{ fontSize: 20, fontWeight: 700 }}>📊 Reportes — próximamente</div>}
 
       </div>
