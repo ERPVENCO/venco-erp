@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
+import PanelGeneral from './PanelGeneral'
 import Inventario from './Inventario'
 import MateriaPrima from './MateriaPrima'
 import Clientes from './Clientes'
@@ -110,27 +111,8 @@ export default function App() {
       {/* Contenido */}
       <div style={{ marginLeft: 220, flex: 1, padding: 28 }}>
 
-        {modulo === 'dashboard' && (
-          <div>
-            <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>¡Bienvenida! 👋</div>
-            <div style={{ fontSize: 13, color: '#9A8E85', marginBottom: 28 }}>Panel de control — Ahumados M&Y</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14 }}>
-              {[
-                { label: 'Ventas hoy', value: '$0', icon: '💰', color: '#1A9156' },
-                { label: 'Productos', value: '0', icon: '📦', color: '#1A5FA8' },
-                { label: 'Clientes', value: '0', icon: '👥', color: '#6B3FA0' },
-                { label: 'Stock crítico', value: '0', icon: '⚠️', color: '#B22222' },
-              ].map(k => (
-                <div key={k.label} style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, padding: 18, borderLeft: `3px solid ${k.color}` }}>
-                  <div style={{ fontSize: 11, color: '#9A8E85', marginBottom: 6 }}>{k.label}</div>
-                  <div style={{ fontSize: 26, fontWeight: 700, color: k.color }}>{k.value}</div>
-                  <div style={{ fontSize: 20, marginTop: 4 }}>{k.icon}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
 
+        {modulo === 'dashboard' && <PanelGeneral />}
         {modulo === 'materia_prima' && <MateriaPrima />}
         {modulo === 'producto_terminado' && <ProductoTerminado />}
         {modulo === 'ventas' && <Ventas />}
