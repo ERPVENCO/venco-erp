@@ -111,7 +111,6 @@ export default function App() {
       {/* Contenido */}
       <div style={{ marginLeft: 220, flex: 1, padding: 28 }}>
 
-
         {modulo === 'dashboard' && <PanelGeneral />}
         {modulo === 'materia_prima' && <MateriaPrima />}
         {modulo === 'producto_terminado' && <ProductoTerminado />}
