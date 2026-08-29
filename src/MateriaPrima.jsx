@@ -73,6 +73,7 @@ export default function MateriaPrima() {
       categoria_mp: nuevo.categoria_mp,
       tipo_inventario: 'materia_prima',
       precio_kg: parseFloat(nuevo.precio_kg) || 0,
+      costo_promedio: parseFloat(nuevo.precio_kg) || 0,
       stock_actual: parseFloat(nuevo.stock_actual) || 0,
       stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
       unidad: nuevo.unidad,
@@ -90,51 +91,42 @@ export default function MateriaPrima() {
   }
 
   const eliminar = async (p) => {
-  // Verificar si está en uso
-  const { data: enUso } = await supabase
-    .from('producto_ingredientes')
-    .select('id')
-    .eq('materia_prima_id', p.id)
-
-  const estaEnUso = enUso && enUso.length > 0
-
-  const mensaje = estaEnUso
-    ? `⚠️ No se puede eliminar porque está siendo utilizado en un ingrediente.\n\n¿Estás segura de que deseas eliminarlo? Ten en cuenta que también se eliminará el ingrediente del producto.`
-    : `¿Estás segura que deseas eliminar "${p.nombre}"?`
-
-  const confirmar = window.confirm(mensaje)
-  if (!confirmar) return
-
-  // Si está en uso, primero eliminar los ingredientes vinculados
-  if (estaEnUso) {
-    await supabase
+    const { data: enUso } = await supabase
       .from('producto_ingredientes')
-      .delete()
+      .select('id')
       .eq('materia_prima_id', p.id)
-  }
 
-  const { data: { user } } = await supabase.auth.getUser()
+    const estaEnUso = enUso && enUso.length > 0
 
-  await supabase.from('auditoria').insert([{
-    tabla: 'productos',
-    accion: 'ELIMINACIÓN',
-    descripcion: `${p.codigo} — ${p.nombre}${estaEnUso ? ' (también se eliminaron ingredientes vinculados)' : ''}`,
-    datos_anteriores: p,
-    usuario_email: user?.email || 'desconocido',
-    fecha: new Date().toISOString()
-  }])
+    const mensaje = estaEnUso
+      ? `⚠️ No se puede eliminar porque está siendo utilizado en un ingrediente.\n\n¿Estás segura de que deseas eliminarlo? Ten en cuenta que también se eliminará el ingrediente del producto.`
+      : `¿Estás segura que deseas eliminar "${p.nombre}"?`
 
-  const { error } = await supabase
-    .from('productos')
-    .delete()
-    .eq('id', p.id)
+    const confirmar = window.confirm(mensaje)
+    if (!confirmar) return
 
-  if (error) {
-    alert('Error al eliminar: ' + error.message)
-  } else {
-    cargar()
-  }
+    if (estaEnUso) {
+      await supabase.from('producto_ingredientes').delete().eq('materia_prima_id', p.id)
+    }
 
+    const { data: { user } } = await supabase.auth.getUser()
+
+    await supabase.from('auditoria').insert([{
+      tabla: 'productos',
+      accion: 'ELIMINACIÓN',
+      descripcion: `${p.codigo} — ${p.nombre}${estaEnUso ? ' (también se eliminaron ingredientes vinculados)' : ''}`,
+      datos_anteriores: p,
+      usuario_email: user?.email || 'desconocido',
+      fecha: new Date().toISOString()
+    }])
+
+    const { error } = await supabase.from('productos').delete().eq('id', p.id)
+
+    if (error) {
+      alert('Error al eliminar: ' + error.message)
+    } else {
+      cargar()
+    }
   }
 
   const estadoStock = (actual, minimo) => {
@@ -167,9 +159,9 @@ export default function MateriaPrima() {
         <div>
           <div style={{ fontSize: 20, fontWeight: 700 }}>🧂 Materia Prima e Insumos</div>
           <div style={{ fontSize: 13, color: '#9A8E85', marginTop: 4 }}>
-  {productos.length} insumos registrados
-  {filtroCategoria !== 'todos' && ` · ${productosFiltrados.length} en esta categoría`}
-</div>
+            {productos.length} insumos registrados
+            {filtroCategoria !== 'todos' && ` · ${productosFiltrados.length} en esta categoría`}
+          </div>
         </div>
         <button onClick={() => setMostrarForm(true)} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '9px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
           ＋ Nuevo insumo
@@ -282,7 +274,7 @@ export default function MateriaPrima() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ background: '#F4F1ED' }}>
-                {['Código','Nombre','Categoría','Unidad','Stock actual','Stock mínimo','Costo/unidad','Caducidad','Estado','Acciones'].map(h => (
+                {['Código','Nombre','Categoría','Unidad','Stock actual','Stock mínimo','Costo promedio','Último costo','Caducidad','Estado','Acciones'].map(h => (
                   <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
                 ))}
               </tr>
@@ -302,7 +294,14 @@ export default function MateriaPrima() {
                     <td style={{ padding: '11px 16px', fontSize: 13 }}>{p.unidad}</td>
                     <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.stock_actual} {p.unidad}</td>
                     <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.stock_minimo} {p.unidad}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>${p.precio_kg?.toLocaleString()}</td>
+                    {/* Costo promedio ponderado — se actualiza automáticamente con cada compra */}
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#1A5FA8' }}>
+                      ${(p.costo_promedio ?? p.precio_kg)?.toLocaleString('es-CO')}
+                    </td>
+                    {/* Último costo pagado en la compra más reciente */}
+                    <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#9A8E85' }}>
+                      {p.ultimo_costo ? `$${p.ultimo_costo?.toLocaleString('es-CO')}` : '—'}
+                    </td>
                     <td style={{ padding: '11px 16px', fontSize: 12, color: p.fecha_caducidad ? '#B22222' : '#9A8E85' }}>{p.fecha_caducidad || '—'}</td>
                     <td style={{ padding: '11px 16px' }}>
                       <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>

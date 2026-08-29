@@ -4,8 +4,14 @@ import Inventario from './Inventario'
 import MateriaPrima from './MateriaPrima'
 import Clientes from './Clientes'
 import Vendedores from './Vendedores'
+import Proveedores from './Proveedores'
 import ProductoTerminado from './ProductoTerminado'
 import Ventas from './Ventas'
+import Compras from './Compras'
+import Manufactura from './Manufactura'
+import Finanzas from './Finanzas'
+import Calidad from './Calidad'
+import ReportesHome from './reportes/ReportesHome'
 import Login from './Login'
 
 export default function App() {
@@ -41,13 +47,16 @@ export default function App() {
     { id: 'clientes', nombre: 'Clientes', icon: '👥' },
     { separador: 'OPERACIONES' },
     { id: 'manufactura', nombre: 'Manufactura', icon: '🏭' },
-    { id: 'compras', nombre: 'Compras', icon: '🚛' },
+    { id: 'proveedores', nombre: 'Proveedores', icon: '🚛' },
+    { id: 'compras', nombre: 'Compras', icon: '🛒' },
     { separador: 'FINANZAS' },
     { id: 'finanzas', nombre: 'Finanzas', icon: '💰' },
     { id: 'empleados', nombre: 'Empleados', icon: '👤' },
     { id: 'vendedores', nombre: 'Vendedores', icon: '🧑‍💼' },
     { separador: 'REPORTES' },
     { id: 'reportes', nombre: 'Reportes', icon: '📊' },
+    { separador: 'CALIDAD' },
+    { id: 'calidad', nombre: 'Calidad', icon: '🔬' },
   ]
 
   return (
@@ -126,12 +135,14 @@ export default function App() {
         {modulo === 'producto_terminado' && <ProductoTerminado />}
         {modulo === 'ventas' && <Ventas />}
         {modulo === 'clientes' && <Clientes />}
-        {modulo === 'manufactura' && <div style={{ fontSize: 20, fontWeight: 700 }}>🏭 Manufactura — próximamente</div>}
-        {modulo === 'compras' && <div style={{ fontSize: 20, fontWeight: 700 }}>🚛 Compras — próximamente</div>}
-        {modulo === 'finanzas' && <div style={{ fontSize: 20, fontWeight: 700 }}>💰 Finanzas — próximamente</div>}
+        {modulo === 'manufactura' && <Manufactura />}
+        {modulo === 'proveedores' && <Proveedores />}
+        {modulo === 'compras' && <Compras />}
+        {modulo === 'finanzas' && <Finanzas />}
         {modulo === 'empleados' && <div style={{ fontSize: 20, fontWeight: 700 }}>👤 Empleados — próximamente</div>}
         {modulo === 'vendedores' && <Vendedores />}
-        {modulo === 'reportes' && <div style={{ fontSize: 20, fontWeight: 700 }}>📊 Reportes — próximamente</div>}
+        {modulo === 'reportes' && <ReportesHome />}
+        {modulo === 'calidad' && <Calidad />}
 
       </div>
     </div>
