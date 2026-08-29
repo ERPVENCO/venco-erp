@@ -6,6 +6,8 @@ export default function MateriaPrima() {
   const [loading, setLoading] = useState(true)
   const [mostrarForm, setMostrarForm] = useState(false)
   const [filtroCategoria, setFiltroCategoria] = useState('todos')
+  const [editando, setEditando] = useState(null)
+  const [materiaDetalle, setMateriaDetalle] = useState(null)
   const [nuevo, setNuevo] = useState({
     nombre: '', categoria_mp: 'materia_prima',
     precio_kg: '', stock_actual: '', stock_minimo: '',
@@ -62,32 +64,68 @@ export default function MateriaPrima() {
     ? `${generarPrefijo(nuevo.categoria_mp)}-${generarIniciales(nuevo.nombre)}-001`
     : '—'
 
+  const abrirEditar = (p) => {
+    setEditando(p)
+    setNuevo({
+      nombre: p.nombre || '',
+      categoria_mp: p.categoria_mp || 'materia_prima',
+      precio_kg: p.precio_kg ?? '',
+      stock_actual: p.stock_actual ?? '',
+      stock_minimo: p.stock_minimo ?? '',
+      unidad: p.unidad || 'kg',
+      codigo_barras: p.codigo_barras || '',
+      fecha_caducidad: p.fecha_caducidad || '',
+      informacion_adicional: p.informacion_adicional || ''
+    })
+    setMostrarForm(true)
+  }
+
+  const cerrarForm = () => {
+    setMostrarForm(false)
+    setEditando(null)
+    setNuevo({ nombre: '', categoria_mp: 'materia_prima', precio_kg: '', stock_actual: '', stock_minimo: '', unidad: 'kg', codigo_barras: '', fecha_caducidad: '', informacion_adicional: '' })
+  }
+
   const guardar = async () => {
     if (!nuevo.nombre) { alert('El nombre es obligatorio'); return }
     if (!nuevo.precio_kg) { alert('El costo es obligatorio'); return }
-    const codigo = await generarCodigo(nuevo.nombre, nuevo.categoria_mp)
-    const { error } = await supabase.from('productos').insert([{
-      codigo,
-      nombre: nuevo.nombre,
-      categoria: 'materia_prima',
-      categoria_mp: nuevo.categoria_mp,
-      tipo_inventario: 'materia_prima',
-      precio_kg: parseFloat(nuevo.precio_kg) || 0,
-      costo_promedio: parseFloat(nuevo.precio_kg) || 0,
-      stock_actual: parseFloat(nuevo.stock_actual) || 0,
-      stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
-      unidad: nuevo.unidad,
-      codigo_barras: nuevo.codigo_barras,
-      fecha_caducidad: nuevo.fecha_caducidad || null,
-      informacion_adicional: nuevo.informacion_adicional,
-    }])
-    if (error) {
-      alert('Error: ' + error.message)
+
+    if (editando) {
+      // No se toca el código ni el costo_promedio (ponderado por compras) al editar manualmente
+      const { error } = await supabase.from('productos').update({
+        nombre: nuevo.nombre,
+        categoria_mp: nuevo.categoria_mp,
+        precio_kg: parseFloat(nuevo.precio_kg) || 0,
+        stock_actual: parseFloat(nuevo.stock_actual) || 0,
+        stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
+        unidad: nuevo.unidad,
+        codigo_barras: nuevo.codigo_barras,
+        fecha_caducidad: nuevo.fecha_caducidad || null,
+        informacion_adicional: nuevo.informacion_adicional,
+      }).eq('id', editando.id)
+      if (error) { alert('Error: ' + error.message); return }
     } else {
-      setMostrarForm(false)
-      setNuevo({ nombre: '', categoria_mp: 'materia_prima', precio_kg: '', stock_actual: '', stock_minimo: '', unidad: 'kg', codigo_barras: '', fecha_caducidad: '', informacion_adicional: '' })
-      cargar()
+      const codigo = await generarCodigo(nuevo.nombre, nuevo.categoria_mp)
+      const { error } = await supabase.from('productos').insert([{
+        codigo,
+        nombre: nuevo.nombre,
+        categoria: 'materia_prima',
+        categoria_mp: nuevo.categoria_mp,
+        tipo_inventario: 'materia_prima',
+        precio_kg: parseFloat(nuevo.precio_kg) || 0,
+        costo_promedio: parseFloat(nuevo.precio_kg) || 0,
+        stock_actual: parseFloat(nuevo.stock_actual) || 0,
+        stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
+        unidad: nuevo.unidad,
+        codigo_barras: nuevo.codigo_barras,
+        fecha_caducidad: nuevo.fecha_caducidad || null,
+        informacion_adicional: nuevo.informacion_adicional,
+      }])
+      if (error) { alert('Error: ' + error.message); return }
     }
+
+    cerrarForm()
+    cargar()
   }
 
   const eliminar = async (p) => {
@@ -155,6 +193,32 @@ export default function MateriaPrima() {
 
   return (
     <div>
+      {/* Modal ver detalle */}
+      {materiaDetalle && (
+        <div onClick={() => setMateriaDetalle(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 420, maxWidth: '95vw', boxShadow: '0 8px 28px rgba(0,0,0,0.15)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>{materiaDetalle.nombre}</div>
+              <span onClick={() => setMateriaDetalle(null)} style={{ cursor: 'pointer', fontSize: 20, color: '#9A8E85' }}>×</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÓDIGO</span><br/>{materiaDetalle.codigo}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CATEGORÍA</span><br/>{categoriaNombre(materiaDetalle.categoria_mp)}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>UNIDAD</span><br/>{materiaDetalle.unidad}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>STOCK ACTUAL</span><br/>{materiaDetalle.stock_actual} {materiaDetalle.unidad}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>STOCK MÍNIMO</span><br/>{materiaDetalle.stock_minimo} {materiaDetalle.unidad}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>COSTO PROMEDIO</span><br/>${(materiaDetalle.costo_promedio ?? materiaDetalle.precio_kg)?.toLocaleString('es-CO')}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>ÚLTIMO COSTO</span><br/>{materiaDetalle.ultimo_costo ? `$${materiaDetalle.ultimo_costo?.toLocaleString('es-CO')}` : '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÓDIGO DE BARRAS</span><br/>{materiaDetalle.codigo_barras || '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CADUCIDAD</span><br/>{materiaDetalle.fecha_caducidad || '—'}</div>
+              {materiaDetalle.informacion_adicional && (
+                <div><span style={{ color: '#9A8E85', fontSize: 11 }}>NOTAS</span><br/>{materiaDetalle.informacion_adicional}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700 }}>🧂 Materia Prima e Insumos</div>
@@ -186,9 +250,9 @@ export default function MateriaPrima() {
       {mostrarForm && (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, padding: 24, marginBottom: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>Nuevo insumo</div>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>{editando ? 'Editar insumo' : 'Nuevo insumo'}</div>
             <div style={{ background: '#F4F1ED', padding: '6px 14px', borderRadius: 7, fontSize: 12 }}>
-              Código: <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#B22222' }}>{codigoPreview}</span>
+              Código: <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#B22222' }}>{editando ? editando.codigo : codigoPreview}</span>
             </div>
           </div>
 
@@ -234,7 +298,7 @@ export default function MateriaPrima() {
                 </select>
               </div>
               <div>
-                <label style={lbl}>CANTIDAD INICIAL</label>
+                <label style={lbl}>CANTIDAD {editando ? 'ACTUAL' : 'INICIAL'}</label>
                 <input type="number" value={nuevo.stock_actual} onChange={e => setNuevo({...nuevo, stock_actual: e.target.value})} placeholder="0" style={inp} />
               </div>
               <div>
@@ -255,8 +319,10 @@ export default function MateriaPrima() {
           </div>
 
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-            <button onClick={() => setMostrarForm(false)} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
-            <button onClick={guardar} style={{ padding: '8px 16px', background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>Guardar</button>
+            <button onClick={cerrarForm} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
+            <button onClick={guardar} style={{ padding: '8px 16px', background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {editando ? 'Actualizar' : 'Guardar'}
+            </button>
           </div>
         </div>
       )}
@@ -307,9 +373,17 @@ export default function MateriaPrima() {
                       <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>
                     </td>
                     <td style={{ padding: '8px 16px' }}>
-                      <button onClick={() => eliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        🗑️ Eliminar
-                      </button>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={() => setMateriaDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          👁️
+                        </button>
+                        <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          ✏️
+                        </button>
+                        <button onClick={() => eliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          🗑️
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )

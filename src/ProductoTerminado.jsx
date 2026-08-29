@@ -12,8 +12,11 @@ export default function ProductoTerminado() {
   const [ingredientes, setIngredientes] = useState([])
   const [fotoArchivo, setFotoArchivo] = useState(null)
   const [fotoPreview, setFotoPreview] = useState(null)
+  const [fotoUrlActual, setFotoUrlActual] = useState(null)
   const [guardando, setGuardando] = useState(false)
   const [productoAEliminar, setProductoAEliminar] = useState(null)
+  const [editando, setEditando] = useState(null)
+  const [productoDetalle, setProductoDetalle] = useState(null)
   const [nuevo, setNuevo] = useState({
     codigo_manual: '', nombre: '', familia: '',
     descripcion: '', presentacion: 'Kg',
@@ -44,6 +47,18 @@ export default function ProductoTerminado() {
       .eq('tipo_inventario', 'materia_prima')
       .order('categoria_mp')
     setMateriasPrimas(data || [])
+  }
+
+  const cargarIngredientesDeProducto = async (productoId) => {
+    const { data } = await supabase
+      .from('producto_ingredientes')
+      .select('*')
+      .eq('producto_id', productoId)
+    setIngredientes((data || []).map(i => ({
+      materia_prima_id: i.materia_prima_id,
+      cantidad: i.cantidad,
+      unidad: i.unidad
+    })))
   }
 
   const seleccionarFoto = (e) => {
@@ -100,21 +115,62 @@ export default function ProductoTerminado() {
     }
   }
 
+  const abrirEditar = async (p) => {
+    setEditando(p)
+    setNuevo({
+      codigo_manual: p.codigo_manual || p.codigo || '',
+      nombre: p.nombre || '',
+      familia: p.familia || '',
+      descripcion: p.descripcion || '',
+      presentacion: p.presentacion || 'Kg',
+      precio_kg: p.precio_kg ?? '',
+      precio2: p.precio2 ?? '',
+      precio3: p.precio3 ?? '',
+      precio4: p.precio4 ?? '',
+      precio5: p.precio5 ?? '',
+      stock_actual: p.stock_actual ?? '',
+      stock_minimo: p.stock_minimo ?? '',
+      fecha_caducidad: p.fecha_caducidad || '',
+      informacion_adicional: p.informacion_adicional || ''
+    })
+    setFotoUrlActual(p.foto_url || null)
+    setFotoPreview(p.foto_url || null)
+    setFotoArchivo(null)
+    await cargarIngredientesDeProducto(p.id)
+    setMostrarForm(true)
+  }
+
+  const cerrarForm = () => {
+    setMostrarForm(false)
+    setEditando(null)
+    setIngredientes([])
+    setFotoArchivo(null)
+    setFotoPreview(null)
+    setFotoUrlActual(null)
+    setNuevo({ codigo_manual: '', nombre: '', familia: '', descripcion: '', presentacion: 'Kg', precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '', stock_actual: '', stock_minimo: '', fecha_caducidad: '', informacion_adicional: '' })
+  }
+
   const guardar = async () => {
     if (!nuevo.codigo_manual) { alert('El código es obligatorio'); return }
     if (!nuevo.nombre) { alert('El nombre es obligatorio'); return }
     if (!nuevo.precio_kg) { alert('El precio 1 es obligatorio'); return }
     if (!nuevo.familia) { alert('La familia es obligatoria'); return }
     setGuardando(true)
-    const { data: existe } = await supabase
-      .from('productos').select('id').eq('codigo_manual', nuevo.codigo_manual)
-    if (existe?.length > 0) {
-      alert('Ese código ya existe. Por favor usa uno diferente.')
-      setGuardando(false)
-      return
+
+    // Al crear, valida que el código no exista. Al editar, el código no cambia.
+    if (!editando) {
+      const { data: existe } = await supabase
+        .from('productos').select('id').eq('codigo_manual', nuevo.codigo_manual)
+      if (existe?.length > 0) {
+        alert('Ese código ya existe. Por favor usa uno diferente.')
+        setGuardando(false)
+        return
+      }
     }
-    const foto_url = await subirFoto(nuevo.codigo_manual)
-    const { data, error } = await supabase.from('productos').insert([{
+
+    const foto_url = fotoArchivo ? await subirFoto(nuevo.codigo_manual) : (fotoUrlActual || null)
+
+    const payload = {
       codigo: nuevo.codigo_manual,
       codigo_manual: nuevo.codigo_manual,
       nombre: nuevo.nombre,
@@ -134,19 +190,29 @@ export default function ProductoTerminado() {
       fecha_caducidad: nuevo.fecha_caducidad || null,
       informacion_adicional: nuevo.informacion_adicional,
       foto_url,
-    }]).select()
-    if (error) { alert('Error: ' + error.message); setGuardando(false); return }
-    if (ingredientes.length > 0 && data?.[0]) {
+    }
+
+    let productoId = editando?.id
+
+    if (editando) {
+      const { error } = await supabase.from('productos').update(payload).eq('id', editando.id)
+      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
+      // Reemplaza los ingredientes: borra los anteriores y vuelve a insertar los actuales
+      await supabase.from('producto_ingredientes').delete().eq('producto_id', editando.id)
+    } else {
+      const { data, error } = await supabase.from('productos').insert([payload]).select()
+      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
+      productoId = data?.[0]?.id
+    }
+
+    if (ingredientes.length > 0 && productoId) {
       const items = ingredientes
         .filter(i => i.materia_prima_id && i.cantidad)
-        .map(i => ({ producto_id: data[0].id, materia_prima_id: i.materia_prima_id, cantidad: parseFloat(i.cantidad), unidad: i.unidad }))
+        .map(i => ({ producto_id: productoId, materia_prima_id: i.materia_prima_id, cantidad: parseFloat(i.cantidad), unidad: i.unidad }))
       if (items.length > 0) await supabase.from('producto_ingredientes').insert(items)
     }
-    setMostrarForm(false)
-    setIngredientes([])
-    setFotoArchivo(null)
-    setFotoPreview(null)
-    setNuevo({ codigo_manual: '', nombre: '', familia: '', descripcion: '', presentacion: 'Kg', precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '', stock_actual: '', stock_minimo: '', fecha_caducidad: '', informacion_adicional: '' })
+
+    cerrarForm()
     setGuardando(false)
     cargar()
   }
@@ -185,6 +251,40 @@ export default function ProductoTerminado() {
         />
       )}
 
+      {/* Modal ver detalle */}
+      {productoDetalle && (
+        <div onClick={() => setProductoDetalle(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 460, maxWidth: '95vw', maxHeight: '85vh', overflowY: 'auto', boxShadow: '0 8px 28px rgba(0,0,0,0.15)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>{productoDetalle.nombre}</div>
+              <span onClick={() => setProductoDetalle(null)} style={{ cursor: 'pointer', fontSize: 20, color: '#9A8E85' }}>×</span>
+            </div>
+            {productoDetalle.foto_url && (
+              <div style={{ width: '100%', height: 220, background: '#F4F1ED', borderRadius: 8, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                <img src={productoDetalle.foto_url} alt={productoDetalle.nombre} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+              </div>
+            )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÓDIGO</span><br/>{productoDetalle.codigo}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>FAMILIA</span><br/>{productoDetalle.familia}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>DESCRIPCIÓN</span><br/>{productoDetalle.descripcion || '—'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>PRESENTACIÓN</span><br/>{productoDetalle.presentacion}</div>
+              <div>
+                <span style={{ color: '#9A8E85', fontSize: 11 }}>PRECIOS</span><br/>
+                {[productoDetalle.precio_kg, productoDetalle.precio2, productoDetalle.precio3, productoDetalle.precio4, productoDetalle.precio5]
+                  .map((pr, i) => pr ? `P${i + 1}: $${pr.toLocaleString()}` : null)
+                  .filter(Boolean).join('   ·   ') || '—'}
+              </div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>STOCK</span><br/>{productoDetalle.stock_actual} (mínimo: {productoDetalle.stock_minimo})</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CADUCIDAD</span><br/>{productoDetalle.fecha_caducidad || '—'}</div>
+              {productoDetalle.informacion_adicional && (
+                <div><span style={{ color: '#9A8E85', fontSize: 11 }}>NOTAS</span><br/>{productoDetalle.informacion_adicional}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700 }}>🌭 Producto Terminado</div>
@@ -215,7 +315,9 @@ export default function ProductoTerminado() {
 
       {mostrarForm && (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, padding: 24, marginBottom: 20 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Nuevo producto terminado</div>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
+            {editando ? 'Editar producto terminado' : 'Nuevo producto terminado'}
+          </div>
 
           {/* Foto */}
           <div style={{ display: 'flex', gap: 20, marginBottom: 16, alignItems: 'flex-start' }}>
@@ -228,7 +330,9 @@ export default function ProductoTerminado() {
             <div style={{ flex: 1 }}>
               <label style={lbl}>FOTO DEL PRODUCTO</label>
               <input type="file" accept="image/*" onChange={seleccionarFoto} style={{ ...inp, padding: '6px' }} />
-              <div style={{ fontSize: 11, color: '#9A8E85', marginTop: 4 }}>Formatos: JPG, PNG. Máx 2MB</div>
+              <div style={{ fontSize: 11, color: '#9A8E85', marginTop: 4 }}>
+                {editando ? 'Deja este campo vacío para conservar la foto actual.' : 'Formatos: JPG, PNG. Máx 2MB'}
+              </div>
             </div>
           </div>
 
@@ -238,7 +342,7 @@ export default function ProductoTerminado() {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <div>
                 <label style={lbl}>CÓDIGO *</label>
-                <input value={nuevo.codigo_manual} onChange={e => setNuevo({...nuevo, codigo_manual: e.target.value.toUpperCase()})} placeholder="Ej. TEK01" style={inp} maxLength={20} />
+                <input value={nuevo.codigo_manual} onChange={e => setNuevo({...nuevo, codigo_manual: e.target.value.toUpperCase()})} placeholder="Ej. TEK01" style={{ ...inp, ...(editando ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }} maxLength={20} disabled={!!editando} />
               </div>
               <div>
                 <label style={lbl}>FAMILIA *</label>
@@ -293,7 +397,7 @@ export default function ProductoTerminado() {
             <div style={{ fontSize: 11, color: '#9A8E85', fontWeight: 600, marginBottom: 12 }}>STOCK</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
               <div>
-                <label style={lbl}>STOCK INICIAL</label>
+                <label style={lbl}>STOCK {editando ? 'ACTUAL' : 'INICIAL'}</label>
                 <input type="number" value={nuevo.stock_actual} onChange={e => setNuevo({...nuevo, stock_actual: e.target.value})} placeholder="0" style={inp} />
               </div>
               <div>
@@ -362,9 +466,9 @@ export default function ProductoTerminado() {
           </div>
 
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-            <button onClick={() => { setMostrarForm(false); setIngredientes([]); setFotoPreview(null); setFotoArchivo(null) }} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
+            <button onClick={cerrarForm} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
             <button onClick={guardar} disabled={guardando} style={{ padding: '8px 16px', background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-              {guardando ? 'Guardando...' : 'Guardar producto'}
+              {guardando ? 'Guardando...' : editando ? 'Actualizar producto' : 'Guardar producto'}
             </button>
           </div>
         </div>
@@ -400,7 +504,7 @@ export default function ProductoTerminado() {
                       }
                     </td>
                     <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600 }}>{p.codigo}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{p.nombre}<br/><span style={{ fontSize: 11, color: '#9A8E85', fontWeight: 400 }}>{p.descripcion}</span></td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{p.nombre}</td>
                     <td style={{ padding: '11px 16px' }}>
                       <span style={{ background: '#FCEAEA', color: '#B22222', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600 }}>{p.familia}</span>
                     </td>
@@ -413,9 +517,17 @@ export default function ProductoTerminado() {
                       <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>
                     </td>
                     <td style={{ padding: '8px 16px' }}>
-                      <button onClick={() => setProductoAEliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        🗑️ Eliminar
-                      </button>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={() => setProductoDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          👁️
+                        </button>
+                        <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          ✏️
+                        </button>
+                        <button onClick={() => setProductoAEliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          🗑️
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
