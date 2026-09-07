@@ -22,7 +22,8 @@ export default function ProductoTerminado() {
     descripcion: '', presentacion: 'Kg',
     precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '',
     stock_actual: '', stock_minimo: '',
-    fecha_caducidad: '', informacion_adicional: ''
+    fecha_caducidad: '', informacion_adicional: '',
+    receta_tipo: 'fija'
   })
 
   useEffect(() => { cargar(); cargarMaterias() }, [])
@@ -131,7 +132,8 @@ export default function ProductoTerminado() {
       stock_actual: p.stock_actual ?? '',
       stock_minimo: p.stock_minimo ?? '',
       fecha_caducidad: p.fecha_caducidad || '',
-      informacion_adicional: p.informacion_adicional || ''
+      informacion_adicional: p.informacion_adicional || '',
+      receta_tipo: p.receta_tipo || 'fija'
     })
     setFotoUrlActual(p.foto_url || null)
     setFotoPreview(p.foto_url || null)
@@ -147,7 +149,7 @@ export default function ProductoTerminado() {
     setFotoArchivo(null)
     setFotoPreview(null)
     setFotoUrlActual(null)
-    setNuevo({ codigo_manual: '', nombre: '', familia: '', descripcion: '', presentacion: 'Kg', precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '', stock_actual: '', stock_minimo: '', fecha_caducidad: '', informacion_adicional: '' })
+    setNuevo({ codigo_manual: '', nombre: '', familia: '', descripcion: '', presentacion: 'Kg', precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '', stock_actual: '', stock_minimo: '', fecha_caducidad: '', informacion_adicional: '', receta_tipo: 'fija' })
   }
 
   const guardar = async () => {
@@ -190,6 +192,7 @@ export default function ProductoTerminado() {
       fecha_caducidad: nuevo.fecha_caducidad || null,
       informacion_adicional: nuevo.informacion_adicional,
       foto_url,
+      receta_tipo: nuevo.receta_tipo,
     }
 
     let productoId = editando?.id
@@ -205,7 +208,7 @@ export default function ProductoTerminado() {
       productoId = data?.[0]?.id
     }
 
-    if (ingredientes.length > 0 && productoId) {
+    if (nuevo.receta_tipo === 'fija' && ingredientes.length > 0 && productoId) {
       const items = ingredientes
         .filter(i => i.materia_prima_id && i.cantidad)
         .map(i => ({ producto_id: productoId, materia_prima_id: i.materia_prima_id, cantidad: parseFloat(i.cantidad), unidad: i.unidad }))
@@ -269,6 +272,7 @@ export default function ProductoTerminado() {
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>FAMILIA</span><br/>{productoDetalle.familia}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>DESCRIPCIÓN</span><br/>{productoDetalle.descripcion || '—'}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>PRESENTACIÓN</span><br/>{productoDetalle.presentacion}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>TIPO DE RECETA</span><br/>{productoDetalle.receta_tipo === 'libre' ? 'Libre (se registra por producción)' : 'Fija'}</div>
               <div>
                 <span style={{ color: '#9A8E85', fontSize: 11 }}>PRECIOS</span><br/>
                 {[productoDetalle.precio_kg, productoDetalle.precio2, productoDetalle.precio3, productoDetalle.precio4, productoDetalle.precio5]
@@ -373,6 +377,21 @@ export default function ProductoTerminado() {
             </div>
           </div>
 
+          {/* Tipo de receta */}
+          <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: '#9A8E85', fontWeight: 600, marginBottom: 12 }}>TIPO DE RECETA</div>
+            <div style={{ display: 'flex', gap: 20 }}>
+              <label style={{ fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="radio" checked={nuevo.receta_tipo === 'fija'} onChange={() => setNuevo({...nuevo, receta_tipo: 'fija'})} />
+                Fija <span style={{ fontSize: 11, color: '#9A8E85' }}>(autocompleta el consumo desde la receta)</span>
+              </label>
+              <label style={{ fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="radio" checked={nuevo.receta_tipo === 'libre'} onChange={() => setNuevo({...nuevo, receta_tipo: 'libre'})} />
+                Libre <span style={{ fontSize: 11, color: '#9A8E85' }}>(materias primas variables por producción)</span>
+              </label>
+            </div>
+          </div>
+
           {/* Precios */}
           <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 14 }}>
             <div style={{ fontSize: 11, color: '#9A8E85', fontWeight: 600, marginBottom: 12 }}>PRECIOS</div>
@@ -411,59 +430,65 @@ export default function ProductoTerminado() {
             </div>
           </div>
 
-          {/* Ingredientes */}
-          <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: 11, color: '#9A8E85', fontWeight: 600 }}>🧂 INGREDIENTES / MATERIAS PRIMAS</div>
-              <button onClick={agregarIngrediente} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-                ＋ Agregar
-              </button>
+          {/* Ingredientes — solo para receta fija */}
+          {nuevo.receta_tipo === 'fija' ? (
+            <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div style={{ fontSize: 11, color: '#9A8E85', fontWeight: 600 }}>🧂 INGREDIENTES / MATERIAS PRIMAS</div>
+                <button onClick={agregarIngrediente} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                  ＋ Agregar
+                </button>
+              </div>
+              {materiasPrimas.length === 0 && (
+                <div style={{ padding: 12, background: '#FEF3DC', borderRadius: 7, fontSize: 12, color: '#C07D00' }}>
+                  ⚠️ Primero registra materias primas en el módulo de Materia Prima e Insumos.
+                </div>
+              )}
+              {ingredientes.length === 0 && materiasPrimas.length > 0 && (
+                <div style={{ padding: 12, background: '#fff', borderRadius: 7, fontSize: 12, color: '#9A8E85', textAlign: 'center' }}>
+                  Haz clic en "＋ Agregar" para seleccionar ingredientes
+                </div>
+              )}
+              {ingredientes.map((ing, index) => (
+                <div key={index} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 10, marginBottom: 10, alignItems: 'end' }}>
+                  <div>
+                    <label style={lbl}>MATERIA PRIMA</label>
+                    <select value={ing.materia_prima_id} onChange={e => actualizarIngrediente(index, 'materia_prima_id', e.target.value)} style={inp}>
+                      <option value="">Selecciona...</option>
+                      {Object.entries(mpPorCategoria).map(([cat, items]) => (
+                        <optgroup key={cat} label={cat === 'materia_prima' ? 'MATERIA PRIMA' : cat === 'insumos' ? 'INSUMOS' : 'EMPAQUES'}>
+                          {items.map(mp => (
+                            <option key={mp.id} value={mp.id}>
+                              {mp.nombre} — Stock: {mp.stock_actual} {mp.unidad}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={lbl}>CANTIDAD</label>
+                    <input type="number" value={ing.cantidad} onChange={e => actualizarIngrediente(index, 'cantidad', e.target.value)} placeholder="0" style={inp} />
+                  </div>
+                  <div>
+                    <label style={lbl}>UNIDAD</label>
+                    <select value={ing.unidad} onChange={e => actualizarIngrediente(index, 'unidad', e.target.value)} style={inp}>
+                      <option value="kg">kg</option>
+                      <option value="g">g</option>
+                      <option value="lt">lt</option>
+                      <option value="und">und</option>
+                      <option value="lb">lb</option>
+                    </select>
+                  </div>
+                  <button onClick={() => eliminarIngrediente(index)} style={{ padding: '8px 12px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 14 }}>✕</button>
+                </div>
+              ))}
             </div>
-            {materiasPrimas.length === 0 && (
-              <div style={{ padding: 12, background: '#FEF3DC', borderRadius: 7, fontSize: 12, color: '#C07D00' }}>
-                ⚠️ Primero registra materias primas en el módulo de Materia Prima e Insumos.
-              </div>
-            )}
-            {ingredientes.length === 0 && materiasPrimas.length > 0 && (
-              <div style={{ padding: 12, background: '#fff', borderRadius: 7, fontSize: 12, color: '#9A8E85', textAlign: 'center' }}>
-                Haz clic en "＋ Agregar" para seleccionar ingredientes
-              </div>
-            )}
-            {ingredientes.map((ing, index) => (
-              <div key={index} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 10, marginBottom: 10, alignItems: 'end' }}>
-                <div>
-                  <label style={lbl}>MATERIA PRIMA</label>
-                  <select value={ing.materia_prima_id} onChange={e => actualizarIngrediente(index, 'materia_prima_id', e.target.value)} style={inp}>
-                    <option value="">Selecciona...</option>
-                    {Object.entries(mpPorCategoria).map(([cat, items]) => (
-                      <optgroup key={cat} label={cat === 'materia_prima' ? 'MATERIA PRIMA' : cat === 'insumos' ? 'INSUMOS' : 'EMPAQUES'}>
-                        {items.map(mp => (
-                          <option key={mp.id} value={mp.id}>
-                            {mp.nombre} — Stock: {mp.stock_actual} {mp.unidad}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label style={lbl}>CANTIDAD</label>
-                  <input type="number" value={ing.cantidad} onChange={e => actualizarIngrediente(index, 'cantidad', e.target.value)} placeholder="0" style={inp} />
-                </div>
-                <div>
-                  <label style={lbl}>UNIDAD</label>
-                  <select value={ing.unidad} onChange={e => actualizarIngrediente(index, 'unidad', e.target.value)} style={inp}>
-                    <option value="kg">kg</option>
-                    <option value="g">g</option>
-                    <option value="lt">lt</option>
-                    <option value="und">und</option>
-                    <option value="lb">lb</option>
-                  </select>
-                </div>
-                <button onClick={() => eliminarIngrediente(index)} style={{ padding: '8px 12px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 14 }}>✕</button>
-              </div>
-            ))}
-          </div>
+          ) : (
+            <div style={{ background: '#FFF8EC', border: '1px solid #F0DFB8', borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 12, color: '#5A4F47' }}>
+              ℹ️ Este producto usa <b>receta libre</b> — no se define una fórmula fija aquí. Las materias primas y cantidades usadas se registran directamente en cada producción, dentro del módulo de Manufactura.
+            </div>
+          )}
 
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
             <button onClick={cerrarForm} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
@@ -487,7 +512,7 @@ export default function ProductoTerminado() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ background: '#F4F1ED' }}>
-                {['Foto','Código','Nombre','Familia','Presentación','Precio 1','Precio 2','Precio 3','Stock','Estado','Acciones'].map(h => (
+                {['Foto','Código','Nombre','Familia','Presentación','Precio 1','Precio 2','Precio 3','Stock','Receta','Estado','Acciones'].map(h => (
                   <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
                 ))}
               </tr>
@@ -513,6 +538,11 @@ export default function ProductoTerminado() {
                     <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.precio2 ? '$' + p.precio2?.toLocaleString() : '—'}</td>
                     <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.precio3 ? '$' + p.precio3?.toLocaleString() : '—'}</td>
                     <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.stock_actual}</td>
+                    <td style={{ padding: '11px 16px' }}>
+                      <span style={{ background: p.receta_tipo === 'libre' ? '#E8F0FB' : '#F0ECE5', color: p.receta_tipo === 'libre' ? '#1A5FA8' : '#5A4F47', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
+                        {p.receta_tipo === 'libre' ? 'Libre' : 'Fija'}
+                      </span>
+                    </td>
                     <td style={{ padding: '11px 16px' }}>
                       <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>
                     </td>

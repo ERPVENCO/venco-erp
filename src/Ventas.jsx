@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from './supabase'
 import ModalEliminar from './ModalEliminar'
 import DocumentoVenta from './DocumentoVenta'
@@ -53,8 +53,14 @@ export default function Ventas() {
     descuento: 0,
     iva: false,
     observaciones: '',
-    fecha_vencimiento: ''
+    fecha_vencimiento: '',
+    fecha: new Date().toISOString().slice(0, 10)
   })
+
+  // Referencias para el manejo de "cantidad" sin bloquear el input mientras se consulta la BD
+  const itemsRef = useRef(items)
+  const debounceLotesRef = useRef({})
+  useEffect(() => { itemsRef.current = items }, [items])
 
   useEffect(() => { cargar(); cargarClientes(); cargarProductos(); cargarVendedores() }, [])
 
@@ -138,68 +144,103 @@ export default function Ventas() {
     }])
   }
 
-  const actualizarItem = async (index, campo, valor) => {
-    const updated = [...items]
-    updated[index][campo] = valor
+  // Actualiza el campo de inmediato (sin esperar a la BD) usando setState funcional,
+  // para que escribir en "cantidad" sea instantáneo y no se pisen valores entre teclas.
+  const actualizarItem = (index, campo, valor) => {
+    setItems(prevItems => {
+      const updated = [...prevItems]
+      const item = { ...updated[index], [campo]: valor }
 
-    if (campo === 'producto_id') {
-      const prod = productos.find(p => p.id === valor)
-      if (prod) {
-        updated[index].nombre_producto = prod.nombre
-        updated[index].codigo_producto = prod.codigo
-        updated[index].unidad = prod.unidad || 'kg'
-        updated[index].precio_unitario = prod.precio_kg || 0
+      if (campo === 'producto_id') {
+        const prod = productos.find(p => p.id === valor)
+        if (prod) {
+          item.nombre_producto = prod.nombre
+          item.codigo_producto = prod.codigo
+          item.unidad = prod.unidad || 'kg'
+          item.precio_unitario = prod.precio_kg || 0
+        }
       }
-      const { lotes_disponibles, lotes_usados } = await calcularLotesFIFO(valor, updated[index].cantidad)
-      updated[index].lotes_disponibles = lotes_disponibles
-      updated[index].lotes_usados = lotes_usados
-    }
 
-    if (campo === 'precio_lista') {
-      const prod = productos.find(p => p.id === updated[index].producto_id)
-      if (prod) {
-        const precios = { 1: prod.precio_kg, 2: prod.precio2, 3: prod.precio3, 4: prod.precio4, 5: prod.precio5 }
-        updated[index].precio_unitario = precios[valor] || prod.precio_kg || 0
+      if (campo === 'precio_lista') {
+        const prod = productos.find(p => p.id === item.producto_id)
+        if (prod) {
+          const precios = { 1: prod.precio_kg, 2: prod.precio2, 3: prod.precio3, 4: prod.precio4, 5: prod.precio5 }
+          item.precio_unitario = precios[valor] || prod.precio_kg || 0
+        }
       }
-    }
 
-    if (campo === 'cantidad') {
-      const { lotes_disponibles, lotes_usados } = await calcularLotesFIFO(updated[index].producto_id, valor)
-      updated[index].lotes_disponibles = lotes_disponibles
-      updated[index].lotes_usados = lotes_usados
-    }
+      if (campo === 'cantidad' || campo === 'precio_unitario' || campo === 'precio_lista') {
+        item.subtotal = (parseFloat(item.cantidad) || 0) * (parseFloat(item.precio_unitario) || 0)
+      }
 
-    if (campo === 'cantidad' || campo === 'precio_unitario' || campo === 'precio_lista') {
-      updated[index].subtotal = (parseFloat(updated[index].cantidad) || 0) * (parseFloat(updated[index].precio_unitario) || 0)
-    }
+      updated[index] = item
+      return updated
+    })
 
-    setItems(updated)
+    // El recálculo de lotes (que consulta la BD) se difiere: si el producto o la
+    // cantidad cambian, esperamos 350ms sin más cambios antes de consultar Supabase.
+    // Esto evita la lentitud y las condiciones de carrera que dejaban un "0" pegado.
+    if (campo === 'producto_id' || campo === 'cantidad') {
+      if (debounceLotesRef.current[index]) clearTimeout(debounceLotesRef.current[index])
+      debounceLotesRef.current[index] = setTimeout(() => recalcularLotesItem(index), 350)
+    }
+  }
+
+  // Consulta los lotes disponibles para el producto/cantidad actuales de un item
+  // y actualiza SOLO ese item, comprobando que siga vigente (por si el usuario ya cambió de producto).
+  const recalcularLotesItem = async (index) => {
+    const actual = itemsRef.current[index]
+    if (!actual) return
+    const { producto_id, cantidad } = actual
+
+    const { lotes_disponibles, lotes_usados } = await calcularLotesFIFO(producto_id, cantidad)
+
+    setItems(prevItems => {
+      const vigente = prevItems[index]
+      // Si mientras esperábamos la respuesta el usuario cambió el producto o la cantidad, no pisamos nada
+      if (!vigente || vigente.producto_id !== producto_id || vigente.cantidad !== cantidad) return prevItems
+      const updated = [...prevItems]
+      updated[index] = { ...vigente, lotes_disponibles, lotes_usados }
+      return updated
+    })
   }
 
   const actualizarLoteItem = (index, loteIdx, campo, valor) => {
-    const updated = [...items]
-    const it = updated[index]
-    it.lotes_usados[loteIdx][campo] = valor
-    if (campo === 'lote_id') {
-      const lote = it.lotes_disponibles.find(l => l.id === valor)
-      if (lote) { it.lotes_usados[loteIdx].codigo_lote = lote.codigo_lote; it.lotes_usados[loteIdx].disponible = lote.cantidad_actual }
-    }
-    setItems(updated)
+    setItems(prevItems => {
+      const updated = [...prevItems]
+      const it = { ...updated[index], lotes_usados: [...updated[index].lotes_usados] }
+      const lote = { ...it.lotes_usados[loteIdx], [campo]: valor }
+      if (campo === 'lote_id') {
+        const disp = it.lotes_disponibles.find(l => l.id === valor)
+        if (disp) { lote.codigo_lote = disp.codigo_lote; lote.disponible = disp.cantidad_actual }
+      }
+      it.lotes_usados[loteIdx] = lote
+      updated[index] = it
+      return updated
+    })
   }
 
   const agregarLoteItem = (index) => {
-    const updated = [...items]
-    updated[index].lotes_usados.push({ lote_id: '', codigo_lote: '', cantidad_usada: '', disponible: 0 })
-    setItems(updated)
+    setItems(prevItems => {
+      const updated = [...prevItems]
+      const it = { ...updated[index] }
+      it.lotes_usados = [...it.lotes_usados, { lote_id: '', codigo_lote: '', cantidad_usada: '', disponible: 0 }]
+      updated[index] = it
+      return updated
+    })
   }
 
   const eliminarLoteItem = (index, loteIdx) => {
-    const updated = [...items]
-    updated[index].lotes_usados = updated[index].lotes_usados.filter((_, i) => i !== loteIdx)
-    setItems(updated)
+    setItems(prevItems => {
+      const updated = [...prevItems]
+      const it = { ...updated[index] }
+      it.lotes_usados = it.lotes_usados.filter((_, i) => i !== loteIdx)
+      updated[index] = it
+      return updated
+    })
   }
 
-  const eliminarItem = (index) => setItems(items.filter((_, i) => i !== index))
+  const eliminarItem = (index) => setItems(prevItems => prevItems.filter((_, i) => i !== index))
 
   // ── Cálculos ──
   const calcularVendedor = () => {
@@ -228,7 +269,7 @@ export default function Ventas() {
     setEditandoId(null)
     setVentaOriginal(null)
     setItems([])
-    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '' })
+    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: new Date().toISOString().slice(0, 10) })
     setMostrarForm(true)
   }
 
@@ -264,7 +305,8 @@ export default function Ventas() {
       descuento: v.descuento || 0,
       iva: v.iva > 0,
       observaciones: v.observaciones || '',
-      fecha_vencimiento: v.fecha_vencimiento || ''
+      fecha_vencimiento: v.fecha_vencimiento || '',
+      fecha: v.creado_en ? new Date(v.creado_en).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)
     })
 
     const itemsConLotes = await Promise.all((itemsVenta || []).map(async (i) => {
@@ -358,7 +400,8 @@ export default function Ventas() {
         comision_valor,
         subtotal, descuento, iva, total,
         observaciones: venta.observaciones,
-        fecha_vencimiento: venta.fecha_vencimiento || null
+        fecha_vencimiento: venta.fecha_vencimiento || null,
+        creado_en: venta.fecha ? new Date(venta.fecha + 'T12:00:00').toISOString() : ventaOriginal.venta.creado_en
       }).eq('id', ventaId)
 
       if (error) { alert('Error: ' + error.message); setGuardando(false); return }
@@ -380,7 +423,8 @@ export default function Ventas() {
         vendedor: vendedor_nombre, comision_porcentaje: comision_porcentaje || 0, comision_valor,
         subtotal, descuento, iva, total,
         observaciones: venta.observaciones, fecha_vencimiento: venta.fecha_vencimiento || null,
-        usuario_email: user?.email
+        usuario_email: user?.email,
+        creado_en: venta.fecha ? new Date(venta.fecha + 'T12:00:00').toISOString() : new Date().toISOString()
       }]).select()
 
       if (error) { alert('Error: ' + error.message); setGuardando(false); return }
@@ -446,7 +490,7 @@ export default function Ventas() {
     setItems([])
     setEditandoId(null)
     setVentaOriginal(null)
-    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '' })
+    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: new Date().toISOString().slice(0, 10) })
     setGuardando(false)
     cargar()
     cargarProductos()
@@ -973,6 +1017,10 @@ export default function Ventas() {
                   <option value="">Selecciona un cliente...</option>
                   {clientes.map(c => <option key={c.id} value={c.id}>{c.empresa}</option>)}
                 </select>
+              </div>
+              <div>
+                <label style={lbl}>FECHA</label>
+                <input type="date" value={venta.fecha} onChange={e => setVenta({...venta, fecha: e.target.value})} style={inp} />
               </div>
               <div>
                 <label style={lbl}>VENDEDOR</label>

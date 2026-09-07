@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from './supabase'
 import ModalEliminar from './ModalEliminar'
 
@@ -432,12 +432,17 @@ function Batches({ onVolver }) {
 
 // ─────────────────────────────────────────────
 // PRODUCCIÓN — cada "caja" agrupa una materia prima procesada
-// compartida por uno o varios productos elaborados a partir de ella
+// compartida por uno o varios productos elaborados a partir de ella.
+//
+// Cada producto puede ser de receta FIJA (autocompleta consumo desde
+// producto_ingredientes) o LIBRE (el consumo se registra manualmente
+// para esa producción, sin fórmula fija — ej. Recorte).
 // ─────────────────────────────────────────────
 function Produccion({ onVolver }) {
   const [producciones, setProducciones] = useState([])
   const [productos, setProductos] = useState([])
   const [subproductos, setSubproductos] = useState([])
+  const [materialesLibres, setMaterialesLibres] = useState([])
   const [batches, setBatches] = useState([])
   const [loading, setLoading] = useState(true)
   const [mostrarForm, setMostrarForm] = useState(false)
@@ -454,6 +459,13 @@ function Produccion({ onVolver }) {
   const [batchLote, setBatchLote] = useState('')
   const [batchNombre, setBatchNombre] = useState('')
   const [cantidadBatch, setCantidadBatch] = useState('')
+
+  // Referencia con el valor más reciente de "cajas" (para leer dentro de
+  // funciones async sin depender de un cierre viejo) y temporizadores de
+  // debounce por producto, para no golpear la BD en cada tecla.
+  const cajasRef = useRef(cajas)
+  useEffect(() => { cajasRef.current = cajas }, [cajas])
+  const debounceProductoRef = useRef({})
 
   const onCambiarBatch = (valor) => {
     setBatchId(valor)
@@ -472,13 +484,15 @@ function Produccion({ onVolver }) {
   }
 
   const cargarCatalogos = async () => {
-    const [{ data: prods }, { data: subs }, { data: bchs }] = await Promise.all([
+    const [{ data: prods }, { data: subs }, { data: mats }, { data: bchs }] = await Promise.all([
       supabase.from('productos').select('*').eq('tipo_inventario', 'producto_terminado').order('nombre'),
       supabase.from('productos').select('*').eq('tipo_inventario', 'materia_prima').eq('categoria_mp', 'materia_prima').order('nombre'),
+      supabase.from('productos').select('*').eq('tipo_inventario', 'materia_prima').order('categoria_mp').order('nombre'),
       supabase.from('batches').select('*').gt('stock_actual', 0).order('fecha_preparacion', { ascending: true })
     ])
     setProductos(prods || [])
     setSubproductos(subs || [])
+    setMaterialesLibres(mats || [])
     setBatches(bchs || [])
   }
 
@@ -488,7 +502,7 @@ function Produccion({ onVolver }) {
 
     const { data: receta } = await supabase
       .from('producto_ingredientes')
-      .select('*, productos!materia_prima_id (id, nombre, codigo, unidad, stock_actual, tipo_inventario)')
+      .select('*, productos!materia_prima_id (id, nombre, codigo, unidad, stock_actual, tipo_inventario, categoria_mp)')
       .eq('producto_id', producto_id)
 
     if (!receta || receta.length === 0) return []
@@ -519,6 +533,7 @@ function Produccion({ onVolver }) {
         materia_prima_id: ing.materia_prima_id,
         nombre: ing.productos?.nombre || '',
         tipo_inventario: ing.productos?.tipo_inventario || 'materia_prima',
+        categoria_mp: ing.productos?.categoria_mp || 'materia_prima',
         unidad_receta: ing.unidad,
         cantidad_receta: parseFloat(ing.cantidad),
         cantidad_requerida: parseFloat(cantidad_requerida.toFixed(4)),
@@ -530,7 +545,7 @@ function Produccion({ onVolver }) {
   }
 
   const productoVacio = () => ({
-    producto_id: '', nombre_producto: '',
+    producto_id: '', nombre_producto: '', receta_tipo: 'fija',
     cantidad_producida: '', unidad_producto: 'kg', lote_producto: '',
     ingredientes: []
   })
@@ -564,21 +579,64 @@ function Produccion({ onVolver }) {
     setCajas(updated)
   }
 
-  const actualizarProducto = async (cajaIdx, prodIdx, campo, valor) => {
-    const updated = [...cajas]
-    const p = updated[cajaIdx].productos[prodIdx]
-    p[campo] = valor
+  // Actualiza el campo de inmediato (sin esperar la BD). Para "producto_id"
+  // y "cantidad_producida" en receta fija, el cálculo de ingredientes
+  // (que consulta Supabase) se difiere 350ms sin más cambios, y solo se
+  // aplica si el producto/cantidad no cambiaron mientras se esperaba la
+  // respuesta — así se evita el "0" pegado y la lentitud al escribir.
+  const actualizarProducto = (cajaIdx, prodIdx, campo, valor) => {
+    setCajas(prev => {
+      const updated = [...prev]
+      const caja = { ...updated[cajaIdx] }
+      const productosCaja = [...caja.productos]
+      const p = { ...productosCaja[prodIdx], [campo]: valor }
 
-    if (campo === 'producto_id') {
-      const prod = productos.find(x => x.id === valor)
-      p.nombre_producto = prod?.nombre || ''
-      p.ingredientes = valor ? await calcularIngredientes(valor, p.cantidad_producida) : []
-    }
-    if (campo === 'cantidad_producida') {
-      p.ingredientes = p.producto_id ? await calcularIngredientes(p.producto_id, valor) : []
-    }
+      if (campo === 'producto_id') {
+        const prod = productos.find(x => x.id === valor)
+        p.nombre_producto = prod?.nombre || ''
+        p.receta_tipo = prod?.receta_tipo || 'fija'
+        // Se limpia de inmediato; la receta fija llega después via debounce
+        p.ingredientes = []
+      }
 
-    setCajas(updated)
+      productosCaja[prodIdx] = p
+      caja.productos = productosCaja
+      updated[cajaIdx] = caja
+      return updated
+    })
+
+    if (campo === 'producto_id' || campo === 'cantidad_producida') {
+      const key = `${cajaIdx}-${prodIdx}`
+      if (debounceProductoRef.current[key]) clearTimeout(debounceProductoRef.current[key])
+      debounceProductoRef.current[key] = setTimeout(() => recalcularIngredientesProducto(cajaIdx, prodIdx), 350)
+    }
+  }
+
+  const recalcularIngredientesProducto = async (cajaIdx, prodIdx) => {
+    const caja = cajasRef.current[cajaIdx]
+    const p = caja?.productos?.[prodIdx]
+    if (!p) return
+    const { producto_id, cantidad_producida, receta_tipo } = p
+
+    // La receta libre nunca se autocompleta
+    if (!producto_id || receta_tipo !== 'fija') return
+
+    const ingredientes = await calcularIngredientes(producto_id, cantidad_producida)
+
+    setCajas(prev => {
+      const cajaVigente = prev[cajaIdx]
+      const pVigente = cajaVigente?.productos?.[prodIdx]
+      // Si mientras esperábamos la respuesta el usuario cambió el producto
+      // o la cantidad, no pisamos su cambio más reciente
+      if (!pVigente || pVigente.producto_id !== producto_id || pVigente.cantidad_producida !== cantidad_producida) return prev
+      const updated = [...prev]
+      const cajaCopy = { ...updated[cajaIdx] }
+      const productosCaja = [...cajaCopy.productos]
+      productosCaja[prodIdx] = { ...pVigente, ingredientes }
+      cajaCopy.productos = productosCaja
+      updated[cajaIdx] = cajaCopy
+      return updated
+    })
   }
 
   const actualizarLoteIngrediente = (cajaIdx, prodIdx, ingIdx, loteIdx, campo, valor) => {
@@ -604,9 +662,78 @@ function Produccion({ onVolver }) {
     setCajas(updated)
   }
 
-  const consumoMPProducto = (producto) => producto.ingredientes.filter(i => i.tipo_inventario === 'materia_prima').reduce((s, i) => s + i.cantidad_requerida, 0)
-  const ingredientesNoMP = (producto) => producto.ingredientes.filter(i => i.tipo_inventario !== 'materia_prima')
+  // ── Receta libre: agregar/editar/quitar materias primas a mano ──
+  // El picker usa `materialesLibres` (materia prima + insumos + empaques),
+  // no `subproductos` (que solo tiene materia prima real, para los
+  // selectores de subproducto/recorte/sobrante de la caja).
+  const agregarMateriaPrimaLibre = (cajaIdx, prodIdx) => {
+    const updated = [...cajas]
+    updated[cajaIdx].productos[prodIdx].ingredientes.push({
+      materia_prima_id: '', nombre: '', tipo_inventario: 'materia_prima', categoria_mp: 'materia_prima',
+      unidad_receta: 'kg', cantidad_receta: null, cantidad_requerida: '',
+      stock_actual: 0, lotes_disponibles: [], lotes_usados: []
+    })
+    setCajas(updated)
+  }
+
+  const actualizarMateriaPrimaLibre = async (cajaIdx, prodIdx, ingIdx, campo, valor) => {
+    if (campo === 'materia_prima_id') {
+      const mp = materialesLibres.find(s => s.id === valor)
+      setCajas(prev => {
+        const updated = [...prev]
+        const ing = updated[cajaIdx].productos[prodIdx].ingredientes[ingIdx]
+        ing.materia_prima_id = valor
+        ing.nombre = mp?.nombre || ''
+        ing.unidad_receta = mp?.unidad || 'kg'
+        ing.categoria_mp = mp?.categoria_mp || 'materia_prima'
+        ing.stock_actual = mp?.stock_actual || 0
+        ing.lotes_usados = []
+        ing.lotes_disponibles = []
+        return updated
+      })
+      if (valor) {
+        const { data: lotes } = await supabase
+          .from('lotes').select('*').eq('producto_id', valor)
+          .gt('cantidad_actual', 0).order('fecha_ingreso', { ascending: true })
+        // Actualización funcional: lee el estado más reciente, no una copia
+        // vieja de antes del await — evita pisar cambios hechos mientras
+        // tanto en otras cajas/productos.
+        setCajas(prev => {
+          const updated = [...prev]
+          updated[cajaIdx].productos[prodIdx].ingredientes[ingIdx].lotes_disponibles = lotes || []
+          return updated
+        })
+      }
+      return
+    }
+
+    setCajas(prev => {
+      const updated = [...prev]
+      updated[cajaIdx].productos[prodIdx].ingredientes[ingIdx][campo] = valor
+      return updated
+    })
+  }
+
+  const eliminarMateriaPrimaLibre = (cajaIdx, prodIdx, ingIdx) => {
+    const updated = [...cajas]
+    updated[cajaIdx].productos[prodIdx].ingredientes = updated[cajaIdx].productos[prodIdx].ingredientes.filter((_, i) => i !== ingIdx)
+    setCajas(updated)
+  }
+
+  const esEmpaqueOInsumo = (categoria) => categoria === 'insumos' || categoria === 'empaques'
+  const consumoMPProducto = (producto) => producto.ingredientes.filter(i => !esEmpaqueOInsumo(i.categoria_mp)).reduce((s, i) => s + (parseFloat(i.cantidad_requerida) || 0), 0)
+  const ingredientesNoMP = (producto) => producto.ingredientes.filter(i => esEmpaqueOInsumo(i.categoria_mp))
   const fmtNum = (n) => (parseFloat(n) || 0).toLocaleString('es-CO', { maximumFractionDigits: 2 })
+
+  // Agrupa materialesLibres por categoria_mp para mostrar optgroups en el
+  // selector de receta libre (Materia Prima / Insumos / Empaques)
+  const materialesPorCategoria = materialesLibres.reduce((acc, mp) => {
+    const cat = mp.categoria_mp || 'materia_prima'
+    if (!acc[cat]) acc[cat] = []
+    acc[cat].push(mp)
+    return acc
+  }, {})
+  const etiquetaCategoria = (cat) => cat === 'materia_prima' ? 'MATERIA PRIMA' : cat === 'insumos' ? 'INSUMOS' : cat === 'empaques' ? 'EMPAQUES' : cat.toUpperCase()
 
   const calcularBalanceCaja = (caja) => {
     const procesada = parseFloat(caja.cantidad_procesada) || 0
@@ -635,11 +762,21 @@ function Produccion({ onVolver }) {
 
       for (const p of caja.productos) {
         if (!p.cantidad_producida) { alert(`Ingresa la cantidad producida para: ${p.nombre_producto}`); return }
-        if (p.ingredientes.length === 0) { alert(`El producto ${p.nombre_producto} no tiene receta definida`); return }
+
+        if (p.ingredientes.length === 0) {
+          alert(p.receta_tipo === 'libre'
+            ? `Agrega al menos una materia prima usada para: ${p.nombre_producto}`
+            : `El producto ${p.nombre_producto} no tiene receta definida`)
+          return
+        }
+
         for (const ing of p.ingredientes) {
+          if (!ing.materia_prima_id) { alert(`Selecciona la materia prima en ${p.nombre_producto}`); return }
           const totalUsado = ing.lotes_usados.reduce((s, l) => s + (parseFloat(l.cantidad_usada) || 0), 0)
-          if (Math.abs(totalUsado - ing.cantidad_requerida) > 0.001) {
-            alert(`${p.nombre_producto} — ${ing.nombre}: la suma de lotes (${totalUsado.toFixed(4)}) debe ser ${ing.cantidad_requerida} ${ing.unidad_receta}`)
+          const cantReq = parseFloat(ing.cantidad_requerida) || 0
+          if (!cantReq) { alert(`Ingresa la cantidad usada de ${ing.nombre} en ${p.nombre_producto}`); return }
+          if (Math.abs(totalUsado - cantReq) > 0.001) {
+            alert(`${p.nombre_producto} — ${ing.nombre}: la suma de lotes (${totalUsado.toFixed(4)}) debe ser ${cantReq} ${ing.unidad_receta}`)
             return
           }
           for (const lu of ing.lotes_usados) {
@@ -649,8 +786,9 @@ function Produccion({ onVolver }) {
         }
       }
 
+      const cajaTieneLibre = caja.productos.some(p => p.receta_tipo === 'libre')
       const bal = calcularBalanceCaja(caja)
-      if (!bal.ok) {
+      if (!bal.ok && !cajaTieneLibre) {
         alert(`Balance incorrecto: materia prima procesada (${bal.procesada}) debe ser igual a consumo de todos los productos + subproducto + recorte + sobrante + merma (suma actual: ${bal.suma})`)
         return
       }
@@ -884,8 +1022,9 @@ function Produccion({ onVolver }) {
 
             {cajas.map((caja, cajaIdx) => {
               const bal = calcularBalanceCaja(caja)
+              const cajaTieneLibre = caja.productos.some(p => p.receta_tipo === 'libre')
               return (
-                <div key={cajaIdx} style={{ background: '#fff', borderRadius: 8, padding: 16, marginBottom: 14, border: `1px solid ${!bal.ok && caja.cantidad_procesada ? '#F5C2C2' : '#DDD8CF'}` }}>
+                <div key={cajaIdx} style={{ background: '#fff', borderRadius: 8, padding: 16, marginBottom: 14, border: `1px solid ${!bal.ok && caja.cantidad_procesada && !cajaTieneLibre ? '#F5C2C2' : '#DDD8CF'}` }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: '#9A8E85' }}>MATERIA PRIMA PROCESADA #{cajaIdx + 1}</div>
                     <button onClick={() => eliminarCaja(cajaIdx)} style={{ padding: '4px 10px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>✕ Eliminar caja</button>
@@ -901,11 +1040,17 @@ function Produccion({ onVolver }) {
                   </div>
 
                   {caja.productos.map((p, prodIdx) => {
-                    const noMP = ingredientesNoMP(p)
                     return (
                       <div key={prodIdx} style={{ background: '#F4F1ED', borderRadius: 7, padding: 14, marginBottom: 10 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                          <div style={{ fontSize: 11, color: '#1A5FA8', fontWeight: 700 }}>PRODUCTO {caja.productos.length > 1 ? `#${prodIdx + 1}` : ''}</div>
+                          <div style={{ fontSize: 11, color: '#1A5FA8', fontWeight: 700 }}>
+                            PRODUCTO {caja.productos.length > 1 ? `#${prodIdx + 1}` : ''}
+                            {p.producto_id && (
+                              <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 600, color: p.receta_tipo === 'libre' ? '#C07D00' : '#9A8E85', background: p.receta_tipo === 'libre' ? '#FEF3DC' : '#F0ECE5', padding: '2px 7px', borderRadius: 10 }}>
+                                {p.receta_tipo === 'libre' ? 'RECETA LIBRE' : 'RECETA FIJA'}
+                              </span>
+                            )}
+                          </div>
                           {caja.productos.length > 1 && (
                             <button onClick={() => eliminarProductoDeCaja(cajaIdx, prodIdx)} style={{ padding: '3px 8px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>✕</button>
                           )}
@@ -915,7 +1060,7 @@ function Produccion({ onVolver }) {
                           <div><label style={lbl}>PRODUCTO TERMINADO *</label>
                             <select value={p.producto_id} onChange={e => actualizarProducto(cajaIdx, prodIdx, 'producto_id', e.target.value)} style={inp}>
                               <option value="">Selecciona...</option>
-                              {productos.map(pr => <option key={pr.id} value={pr.id}>{pr.codigo} — {pr.nombre}</option>)}
+                              {productos.map(pr => <option key={pr.id} value={pr.id}>{pr.codigo} — {pr.nombre}{pr.receta_tipo === 'libre' ? ' (receta libre)' : ''}</option>)}
                             </select>
                           </div>
                           <div><label style={lbl}>CANTIDAD PRODUCIDA *</label><input type="number" value={p.cantidad_producida} onChange={e => actualizarProducto(cajaIdx, prodIdx, 'cantidad_producida', e.target.value)} placeholder="0" style={inp} /></div>
@@ -927,15 +1072,16 @@ function Produccion({ onVolver }) {
                           <div><label style={lbl}>LOTE PT <span style={{ fontSize: 9, color: '#9A8E85' }}>(auto)</span></label><input value={p.lote_producto} onChange={e => actualizarProducto(cajaIdx, prodIdx, 'lote_producto', e.target.value)} placeholder={generarLote('PT')} style={inp} /></div>
                         </div>
 
-                        {p.producto_id && p.cantidad_producida && p.ingredientes.length === 0 && (
+                        {/* RECETA FIJA: autocompletada desde producto_ingredientes */}
+                        {p.producto_id && p.receta_tipo === 'fija' && p.cantidad_producida && p.ingredientes.length === 0 && (
                           <div style={{ background: '#FCEAEA', borderRadius: 7, padding: 10, fontSize: 12, color: '#B22222', marginBottom: 10 }}>⚠️ Este producto no tiene receta definida.</div>
                         )}
 
-                        {p.ingredientes.filter(i => i.tipo_inventario === 'materia_prima').length > 0 && (
+                        {p.receta_tipo === 'fija' && p.ingredientes.filter(i => !esEmpaqueOInsumo(i.categoria_mp)).length > 0 && (
                           <div style={{ background: '#fff', borderRadius: 7, padding: 12, marginBottom: 10 }}>
                             <div style={{ fontSize: 10, color: '#1A5FA8', fontWeight: 600, marginBottom: 8 }}>🥩 MATERIA(S) PRIMA(S) DE LA RECETA</div>
                             {p.ingredientes.map((ing, ingIdx) => {
-                              if (ing.tipo_inventario !== 'materia_prima') return null
+                              if (esEmpaqueOInsumo(ing.categoria_mp)) return null
                               const totalUsado = ing.lotes_usados.reduce((s, l) => s + (parseFloat(l.cantidad_usada) || 0), 0)
                               const ok = Math.abs(totalUsado - ing.cantidad_requerida) < 0.001
                               return (
@@ -968,16 +1114,100 @@ function Produccion({ onVolver }) {
                           </div>
                         )}
 
-                        {noMP.length > 0 && (
+                        {/* RECETA LIBRE: materias primas y cantidades a mano, para esta producción puntual */}
+                        {p.producto_id && p.receta_tipo === 'libre' && (
                           <div style={{ background: '#fff', borderRadius: 7, padding: 12, marginBottom: 10 }}>
-                            <div style={{ fontSize: 10, color: '#9A8E85', fontWeight: 600, marginBottom: 8 }}>📦 EMPAQUES / INSUMOS (se descuentan automático)</div>
-                            {noMP.map((ing, ni) => {
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                              <div style={{ fontSize: 10, color: '#C07D00', fontWeight: 600 }}>🥩 MATERIAS PRIMAS USADAS (receta libre — regístralas para esta producción)</div>
+                              <button onClick={() => agregarMateriaPrimaLibre(cajaIdx, prodIdx)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>＋ Materia prima</button>
+                            </div>
+                            {p.ingredientes.length === 0 && (
+                              <div style={{ fontSize: 12, color: '#9A8E85', textAlign: 'center', padding: 8 }}>Agrega al menos una materia prima usada</div>
+                            )}
+                            {p.ingredientes.map((ing, ingIdx) => {
+                              const totalUsado = ing.lotes_usados.reduce((s, l) => s + (parseFloat(l.cantidad_usada) || 0), 0)
+                              const cantReq = parseFloat(ing.cantidad_requerida) || 0
+                              const ok = Math.abs(totalUsado - cantReq) < 0.001
+                              return (
+                                <div key={ingIdx} style={{ background: '#F4F1ED', borderRadius: 7, padding: 12, marginBottom: 8, border: `1px solid ${ok ? '#DDD8CF' : '#F5C2C2'}` }}>
+                                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr auto', gap: 8, alignItems: 'end', marginBottom: 8 }}>
+                                    <div><label style={lbl}>MATERIA PRIMA / INSUMO / EMPAQUE</label>
+                                      <select value={ing.materia_prima_id} onChange={e => actualizarMateriaPrimaLibre(cajaIdx, prodIdx, ingIdx, 'materia_prima_id', e.target.value)} style={inp}>
+                                        <option value="">Selecciona...</option>
+                                        {Object.entries(materialesPorCategoria).map(([cat, items]) => (
+                                          <optgroup key={cat} label={etiquetaCategoria(cat)}>
+                                            {items.map(mp => <option key={mp.id} value={mp.id}>{mp.codigo} — {mp.nombre} (Stock: {fmtNum(mp.stock_actual)} {mp.unidad})</option>)}
+                                          </optgroup>
+                                        ))}
+                                      </select>
+                                    </div>
+                                    <div><label style={lbl}>CANTIDAD USADA ({ing.unidad_receta})</label>
+                                      <input type="number" value={ing.cantidad_requerida} onChange={e => actualizarMateriaPrimaLibre(cajaIdx, prodIdx, ingIdx, 'cantidad_requerida', e.target.value)} placeholder="0" style={inp} />
+                                    </div>
+                                    <button onClick={() => eliminarMateriaPrimaLibre(cajaIdx, prodIdx, ingIdx)} style={{ padding: '8px 9px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginBottom: 1 }}>✕</button>
+                                  </div>
+                                  {ing.materia_prima_id && (
+                                    <>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                        <span style={{ fontSize: 11, color: '#9A8E85' }}>Lotes usados</span>
+                                        <button onClick={() => agregarLoteIngrediente(cajaIdx, prodIdx, ingIdx)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>＋ Lote</button>
+                                      </div>
+                                      {ing.lotes_usados.map((lu, loteIdx) => (
+                                        <div key={loteIdx} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr auto', gap: 8, alignItems: 'end', marginBottom: 6 }}>
+                                          <div><label style={lbl}>LOTE</label>
+                                            <select value={lu.lote_id} onChange={e => actualizarLoteIngrediente(cajaIdx, prodIdx, ingIdx, loteIdx, 'lote_id', e.target.value)} style={inp}>
+                                              <option value="">Selecciona lote...</option>
+                                              {ing.lotes_disponibles.map(l => <option key={l.id} value={l.id}>{l.codigo_lote} — Disp: {fmtNum(l.cantidad_actual)} {ing.unidad_receta}</option>)}
+                                            </select>
+                                          </div>
+                                          <div><label style={lbl}>CANTIDAD ({ing.unidad_receta})</label><input type="number" value={lu.cantidad_usada} onChange={e => actualizarLoteIngrediente(cajaIdx, prodIdx, ingIdx, loteIdx, 'cantidad_usada', e.target.value)} placeholder="0" style={inp} /></div>
+                                          <button onClick={() => eliminarLoteIngrediente(cajaIdx, prodIdx, ingIdx, loteIdx)} style={{ padding: '8px 9px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginBottom: 1 }}>✕</button>
+                                        </div>
+                                      ))}
+                                      <div style={{ fontSize: 11, marginTop: 4, color: '#9A8E85' }}>
+                                        Total: <b style={{ color: ok ? '#1A9156' : '#B22222' }}>{fmtNum(totalUsado)} {ing.unidad_receta}</b> / {fmtNum(cantReq)} {ing.unidad_receta} {ok && <span style={{ color: '#1A9156' }}>✓</span>}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+
+                        {p.ingredientes.filter(i => esEmpaqueOInsumo(i.categoria_mp)).length > 0 && (
+                          <div style={{ background: '#fff', borderRadius: 7, padding: 12, marginBottom: 10 }}>
+                            <div style={{ fontSize: 10, color: '#9A8E85', fontWeight: 600, marginBottom: 8 }}>📦 EMPAQUES / INSUMOS</div>
+                            {p.ingredientes.map((ing, ingIdx) => {
+                              if (!esEmpaqueOInsumo(ing.categoria_mp)) return null
                               const totalUsado = ing.lotes_usados.reduce((s, l) => s + (parseFloat(l.cantidad_usada) || 0), 0)
                               const ok = Math.abs(totalUsado - ing.cantidad_requerida) < 0.001
                               return (
-                                <div key={ni} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#F4F1ED', borderRadius: 6, padding: '8px 10px', marginBottom: 6, fontSize: 12 }}>
-                                  <span>{ing.nombre}</span>
-                                  <span style={{ fontWeight: 600, color: ok ? '#1A9156' : '#B22222' }}>{totalUsado.toLocaleString('es-CO', { maximumFractionDigits: 2 })} / {ing.cantidad_requerida.toLocaleString('es-CO', { maximumFractionDigits: 2 })} {ing.unidad_receta}</span>
+                                <div key={ingIdx} style={{ background: '#F4F1ED', borderRadius: 7, padding: 12, marginBottom: 8, border: `1px solid ${ok ? '#DDD8CF' : '#F5C2C2'}` }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                    <div>
+                                      <span style={{ fontWeight: 600, fontSize: 13 }}>{ing.nombre}</span>
+                                      <span style={{ fontSize: 11, color: '#9A8E85', marginLeft: 10 }}>Requerido: <b style={{ color: '#1A5FA8' }}>{fmtNum(ing.cantidad_requerida)} {ing.unidad_receta}</b></span>
+                                    </div>
+                                    <button onClick={() => agregarLoteIngrediente(cajaIdx, prodIdx, ingIdx)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>＋ Lote</button>
+                                  </div>
+                                  {ing.lotes_usados.map((lu, loteIdx) => (
+                                    <div key={loteIdx} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr auto', gap: 8, alignItems: 'end', marginBottom: 6 }}>
+                                      <div><label style={lbl}>LOTE <span style={{ fontSize: 9, color: '#9A8E85' }}>(editable — por defecto toma el siguiente disponible)</span></label>
+                                        <select value={lu.lote_id} onChange={e => actualizarLoteIngrediente(cajaIdx, prodIdx, ingIdx, loteIdx, 'lote_id', e.target.value)} style={inp}>
+                                          <option value="">Selecciona lote...</option>
+                                          {ing.lotes_disponibles.map(l => <option key={l.id} value={l.id}>{l.codigo_lote} — Disp: {fmtNum(l.cantidad_actual)} {ing.unidad_receta}</option>)}
+                                        </select>
+                                      </div>
+                                      <div><label style={lbl}>CANTIDAD ({ing.unidad_receta})</label>
+                                        <input type="number" value={lu.cantidad_usada} disabled style={{ ...inp, opacity: 0.6, cursor: 'not-allowed' }} />
+                                      </div>
+                                      <button onClick={() => eliminarLoteIngrediente(cajaIdx, prodIdx, ingIdx, loteIdx)} style={{ padding: '8px 9px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginBottom: 1 }}>✕</button>
+                                    </div>
+                                  ))}
+                                  <div style={{ fontSize: 11, marginTop: 4, color: '#9A8E85' }}>
+                                    Total: <b style={{ color: ok ? '#1A9156' : '#B22222' }}>{fmtNum(totalUsado)} {ing.unidad_receta}</b> / {fmtNum(ing.cantidad_requerida)} {ing.unidad_receta} {ok && <span style={{ color: '#1A9156' }}>✓</span>}
+                                  </div>
                                 </div>
                               )
                             })}
@@ -1043,15 +1273,17 @@ function Produccion({ onVolver }) {
                     <div style={{ maxWidth: 200, marginBottom: 10 }}><label style={lbl}>MERMA ({caja.unidad_mp})</label><input type="number" value={caja.merma} onChange={e => actualizarCaja(cajaIdx, 'merma', e.target.value)} placeholder="0" style={inp} /></div>
 
                     {caja.cantidad_procesada && (
-                      <div style={{ background: bal.ok ? '#E8F7EF' : '#FCEAEA', borderRadius: 7, padding: 10, fontSize: 12 }}>
-                        <div style={{ fontWeight: 600, color: bal.ok ? '#1A9156' : '#B22222', marginBottom: 4 }}>{bal.ok ? '✓ Balance correcto' : '⚠️ Balance incorrecto'}</div>
+                      <div style={{ background: bal.ok ? '#E8F7EF' : (cajaTieneLibre ? '#FFF8EC' : '#FCEAEA'), borderRadius: 7, padding: 10, fontSize: 12 }}>
+                        <div style={{ fontWeight: 600, color: bal.ok ? '#1A9156' : (cajaTieneLibre ? '#C07D00' : '#B22222'), marginBottom: 4 }}>
+                          {bal.ok ? '✓ Balance correcto' : cajaTieneLibre ? 'ℹ️ Balance no cuadra exacto — informativo, esta caja tiene producto de receta libre' : '⚠️ Balance incorrecto'}
+                        </div>
                         <div style={{ color: '#5A4F47' }}>
                           Procesado: <b>{fmtNum(bal.procesada)} {caja.unidad_mp}</b> = Consumo de {caja.productos.length} producto(s): <b>{fmtNum(bal.consumo)}</b>
                           {caja.tiene_subproducto && ` + Subprod: ${fmtNum(caja.cantidad_subproducto)}`}
                           {caja.tiene_recorte && ` + Recorte: ${fmtNum(caja.cantidad_recorte)}`}
                           {caja.tiene_sobrante && ` + Sobrante: ${fmtNum(caja.cantidad_sobrante)}`}
-                          {` + Merma: ${fmtNum(caja.merma)}`} = <b style={{ color: bal.ok ? '#1A9156' : '#B22222' }}>{fmtNum(bal.suma)}</b>
-                          {!bal.ok && <span style={{ color: '#B22222' }}> (diferencia: {bal.diff > 0 ? '+' : ''}{fmtNum(bal.diff)})</span>}
+                          {` + Merma: ${fmtNum(caja.merma)}`} = <b style={{ color: bal.ok ? '#1A9156' : (cajaTieneLibre ? '#C07D00' : '#B22222') }}>{fmtNum(bal.suma)}</b>
+                          {!bal.ok && <span style={{ color: cajaTieneLibre ? '#C07D00' : '#B22222' }}> (diferencia: {bal.diff > 0 ? '+' : ''}{fmtNum(bal.diff)})</span>}
                         </div>
                       </div>
                     )}
