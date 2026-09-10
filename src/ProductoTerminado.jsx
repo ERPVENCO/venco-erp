@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import ModalEliminar from './ModalEliminar'
+import EscanerCodigoBarras from './EscanerCodigoBarras'
 import { supabase } from './supabase'
 
 export default function ProductoTerminado() {
@@ -17,13 +18,14 @@ export default function ProductoTerminado() {
   const [productoAEliminar, setProductoAEliminar] = useState(null)
   const [editando, setEditando] = useState(null)
   const [productoDetalle, setProductoDetalle] = useState(null)
+  const [mostrarEscaner, setMostrarEscaner] = useState(false)
   const [nuevo, setNuevo] = useState({
     codigo_manual: '', nombre: '', familia: '',
     descripcion: '', presentacion: 'Kg',
     precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '',
     stock_actual: '', stock_minimo: '',
     fecha_caducidad: '', informacion_adicional: '',
-    receta_tipo: 'fija'
+    receta_tipo: 'fija', codigo_barras: ''
   })
 
   useEffect(() => { cargar(); cargarMaterias() }, [])
@@ -133,7 +135,8 @@ export default function ProductoTerminado() {
       stock_minimo: p.stock_minimo ?? '',
       fecha_caducidad: p.fecha_caducidad || '',
       informacion_adicional: p.informacion_adicional || '',
-      receta_tipo: p.receta_tipo || 'fija'
+      receta_tipo: p.receta_tipo || 'fija',
+      codigo_barras: p.codigo_barras || ''
     })
     setFotoUrlActual(p.foto_url || null)
     setFotoPreview(p.foto_url || null)
@@ -149,7 +152,7 @@ export default function ProductoTerminado() {
     setFotoArchivo(null)
     setFotoPreview(null)
     setFotoUrlActual(null)
-    setNuevo({ codigo_manual: '', nombre: '', familia: '', descripcion: '', presentacion: 'Kg', precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '', stock_actual: '', stock_minimo: '', fecha_caducidad: '', informacion_adicional: '', receta_tipo: 'fija' })
+    setNuevo({ codigo_manual: '', nombre: '', familia: '', descripcion: '', presentacion: 'Kg', precio_kg: '', precio2: '', precio3: '', precio4: '', precio5: '', stock_actual: '', stock_minimo: '', fecha_caducidad: '', informacion_adicional: '', receta_tipo: 'fija', codigo_barras: '' })
   }
 
   const guardar = async () => {
@@ -165,6 +168,17 @@ export default function ProductoTerminado() {
         .from('productos').select('id').eq('codigo_manual', nuevo.codigo_manual)
       if (existe?.length > 0) {
         alert('Ese código ya existe. Por favor usa uno diferente.')
+        setGuardando(false)
+        return
+      }
+    }
+
+    if (nuevo.codigo_barras) {
+      let queryBarras = supabase.from('productos').select('id').eq('codigo_barras', nuevo.codigo_barras)
+      if (editando) queryBarras = queryBarras.neq('id', editando.id)
+      const { data: existeBarras } = await queryBarras
+      if (existeBarras?.length > 0) {
+        alert('Ese código de barras ya está asignado a otro producto.')
         setGuardando(false)
         return
       }
@@ -193,6 +207,7 @@ export default function ProductoTerminado() {
       informacion_adicional: nuevo.informacion_adicional,
       foto_url,
       receta_tipo: nuevo.receta_tipo,
+      codigo_barras: nuevo.codigo_barras || null,
     }
 
     let productoId = editando?.id
@@ -243,6 +258,14 @@ export default function ProductoTerminado() {
 
   return (
     <div>
+      {/* Modal escáner de cámara */}
+      {mostrarEscaner && (
+        <EscanerCodigoBarras
+          onDetectado={(codigo) => { setNuevo(prev => ({ ...prev, codigo_barras: codigo })); setMostrarEscaner(false) }}
+          onCerrar={() => setMostrarEscaner(false)}
+        />
+      )}
+
       {/* Modal eliminar — AQUÍ arriba de todo */}
       {productoAEliminar && (
         <ModalEliminar
@@ -269,6 +292,7 @@ export default function ProductoTerminado() {
             )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÓDIGO</span><br/>{productoDetalle.codigo}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÓDIGO DE BARRAS</span><br/>{productoDetalle.codigo_barras || '—'}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>FAMILIA</span><br/>{productoDetalle.familia}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>DESCRIPCIÓN</span><br/>{productoDetalle.descripcion || '—'}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>PRESENTACIÓN</span><br/>{productoDetalle.presentacion}</div>
@@ -347,6 +371,21 @@ export default function ProductoTerminado() {
               <div>
                 <label style={lbl}>CÓDIGO *</label>
                 <input value={nuevo.codigo_manual} onChange={e => setNuevo({...nuevo, codigo_manual: e.target.value.toUpperCase()})} placeholder="Ej. TEK01" style={{ ...inp, ...(editando ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }} maxLength={20} disabled={!!editando} />
+              </div>
+              <div>
+                <label style={lbl}>CÓDIGO DE BARRAS <span style={{ fontSize: 9, color: '#9A8E85' }}>(escanea con el lector, la cámara o escribe)</span></label>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input
+                    value={nuevo.codigo_barras}
+                    onChange={e => setNuevo({...nuevo, codigo_barras: e.target.value})}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur() } }}
+                    placeholder="Escanea o escribe el código"
+                    style={inp}
+                  />
+                  <button type="button" onClick={() => setMostrarEscaner(true)} title="Escanear con cámara" style={{ flexShrink: 0, padding: '0 12px', background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 16 }}>
+                    📷
+                  </button>
+                </div>
               </div>
               <div>
                 <label style={lbl}>FAMILIA *</label>

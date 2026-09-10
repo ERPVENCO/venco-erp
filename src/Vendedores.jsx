@@ -1,196 +1,491 @@
-import { useState, useEffect } from 'react'
-import { supabase } from './supabase'
+import { useEffect, useState } from "react";
+import { supabase } from "./supabase";
 
-export default function Vendedores() {
-  const [vendedores, setVendedores] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [mostrarForm, setMostrarForm] = useState(false)
-  const [editando, setEditando] = useState(null)
-  const [nuevo, setNuevo] = useState({
-    nombre: '', telefono: '',
-    comision_tipo: 'porcentaje',
-    comision_porcentaje: '',
-    comision_valor_fijo: ''
-  })
+const COLOR = "#B22222";
+const FONDO = "#F4F1ED";
 
-  useEffect(() => { cargar() }, [])
+export default function Empleados() {
+  const [empleados, setEmpleados] = useState([]);
+  const [busqueda, setBusqueda] = useState("");
+  const [empleado, setEmpleado] = useState(null);
+  const [seccion, setSeccion] = useState("info");
 
-  const cargar = async () => {
-    setLoading(true)
-    const { data } = await supabase.from('vendedores').select('*').order('nombre')
-    setVendedores(data || [])
-    setLoading(false)
+  const [kpi, setKpi] = useState({
+    activos: 0,
+    documentos: 0,
+    capacitaciones: 0,
+  });
+
+  useEffect(() => {
+    cargarTodo();
+  }, []);
+
+  async function cargarTodo() {
+    await Promise.all([
+      cargarEmpleados(),
+      cargarIndicadores()
+    ]);
   }
 
-  const abrirEditar = (v) => {
-    setEditando(v)
-    setNuevo({
-      nombre: v.nombre,
-      telefono: v.telefono || '',
-      comision_tipo: v.comision_tipo || 'porcentaje',
-      comision_porcentaje: v.comision_porcentaje || '',
-      comision_valor_fijo: v.comision_valor_fijo || ''
-    })
-    setMostrarForm(true)
+  async function cargarEmpleados() {
+    const { data } = await supabase
+      .from("empleados")
+      .select("*")
+      .order("codigo");
+
+    setEmpleados(data || []);
   }
 
-  const cerrarForm = () => {
-    setMostrarForm(false)
-    setEditando(null)
-    setNuevo({ nombre: '', telefono: '', comision_tipo: 'porcentaje', comision_porcentaje: '', comision_valor_fijo: '' })
+  async function cargarIndicadores() {
+
+    const hoy = new Date();
+    const limite = new Date();
+    limite.setDate(hoy.getDate() + 30);
+
+    const { count: activos } = await supabase
+      .from("empleados")
+      .select("*", { head: true, count: "exact" })
+      .eq("estado", "ACTIVO");
+
+    const { count: documentos } = await supabase
+      .from("empleado_documentos")
+      .select("*", { head: true, count: "exact" })
+      .gte("fecha_vencimiento", hoy.toISOString())
+      .lte("fecha_vencimiento", limite.toISOString());
+
+    const { count: capacitaciones } = await supabase
+      .from("empleado_capacitaciones")
+      .select("*", { head: true, count: "exact" })
+      .gte("fecha_vencimiento", hoy.toISOString())
+      .lte("fecha_vencimiento", limite.toISOString());
+
+    setKpi({
+      activos: activos || 0,
+      documentos: documentos || 0,
+      capacitaciones: capacitaciones || 0
+    });
   }
 
-  const guardar = async () => {
-    if (!nuevo.nombre) { alert('El nombre es obligatorio'); return }
-
-    const datos = {
-      nombre: nuevo.nombre,
-      telefono: nuevo.telefono,
-      comision_tipo: nuevo.comision_tipo,
-      comision_porcentaje: parseFloat(nuevo.comision_porcentaje) || 0,
-      comision_valor_fijo: parseFloat(nuevo.comision_valor_fijo) || 0,
-    }
-
-    if (editando) {
-      const { error } = await supabase.from('vendedores').update(datos).eq('id', editando.id)
-      if (error) { alert('Error: ' + error.message); return }
-    } else {
-      const { error } = await supabase.from('vendedores').insert([datos])
-      if (error) { alert('Error: ' + error.message); return }
-    }
-
-    cerrarForm()
-    cargar()
+  if (empleado) {
+    return (
+      <FichaEmpleado
+        empleado={empleado}
+        volver={() => setEmpleado(null)}
+        seccion={seccion}
+        setSeccion={setSeccion}
+      />
+    );
   }
 
-  const eliminar = async (v) => {
-    const confirmar = window.confirm(`¿Estás segura que deseas eliminar a "${v.nombre}"?`)
-    if (!confirmar) return
-    const { error } = await supabase.from('vendedores').delete().eq('id', v.id)
-    if (error) { alert('Error: ' + error.message); return }
-    cargar()
-  }
-
-  const toggleActivo = async (v) => {
-    await supabase.from('vendedores').update({ activo: !v.activo }).eq('id', v.id)
-    cargar()
-  }
-
-  const inp = { width: '100%', padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, boxSizing: 'border-box', background: '#F4F1ED' }
-  const lbl = { fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }
+  const filtrados = empleados.filter((e) =>
+    `${e.codigo} ${e.nombres} ${e.apellidos} ${e.cedula}`
+      .toLowerCase()
+      .includes(busqueda.toLowerCase())
+  );
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 700 }}>🧑‍💼 Vendedores</div>
-          <div style={{ fontSize: 13, color: '#5A4F47', marginTop: 4 }}>
-            {loading ? '...' : `${vendedores.length} vendedores registrados`}
-          </div>
-        </div>
-        <button onClick={() => setMostrarForm(true)} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '9px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
-          ＋ Nuevo vendedor
-        </button>
+    <div style={{ background: FONDO, minHeight: "100vh", padding: 20 }}>
+
+      <h2 style={{ color: COLOR, marginBottom: 20 }}>👥 Empleados</h2>
+
+      {/* KPIs */}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
+          gap: 15,
+          marginBottom: 20,
+        }}
+      >
+        <KPI icon="👥" valor={kpi.activos} titulo="Empleados activos" />
+        <KPI icon="📄" valor={kpi.documentos} titulo="Documentos por vencer" />
+        <KPI icon="🎓" valor={kpi.capacitaciones} titulo="Capacitación por vencer" />
       </div>
 
-      {mostrarForm && (
-        <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, padding: 24, marginBottom: 20 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
-            {editando ? `Editando: ${editando.nombre}` : 'Nuevo vendedor'}
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
-            <div>
-              <label style={lbl}>NOMBRE *</label>
-              <input value={nuevo.nombre} onChange={e => setNuevo({...nuevo, nombre: e.target.value})} placeholder="Nombre completo" style={inp} />
-            </div>
-            <div>
-              <label style={lbl}>TELÉFONO</label>
-              <input value={nuevo.telefono} onChange={e => setNuevo({...nuevo, telefono: e.target.value})} placeholder="310 000 0000" style={inp} />
-            </div>
-            <div>
-              <label style={lbl}>TIPO COMISIÓN</label>
-              <select value={nuevo.comision_tipo} onChange={e => setNuevo({...nuevo, comision_tipo: e.target.value})} style={inp}>
-                <option value="porcentaje">Porcentaje (%)</option>
-                <option value="pesos">Valor fijo ($)</option>
-              </select>
-            </div>
-            <div>
-              <label style={lbl}>{nuevo.comision_tipo === 'porcentaje' ? 'COMISIÓN %' : 'COMISIÓN $'}</label>
-              <input
-                type="number"
-                value={nuevo.comision_tipo === 'porcentaje' ? nuevo.comision_porcentaje : nuevo.comision_valor_fijo}
-                onChange={e => nuevo.comision_tipo === 'porcentaje'
-                  ? setNuevo({...nuevo, comision_porcentaje: e.target.value})
-                  : setNuevo({...nuevo, comision_valor_fijo: e.target.value})
-                }
-                placeholder="0"
-                style={inp}
-              />
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-            <button onClick={cerrarForm} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
-            <button onClick={guardar} style={{ padding: '8px 16px', background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-              {editando ? 'Actualizar' : 'Guardar'}
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Tareas */}
 
-      {loading ? (
-        <div style={{ textAlign: 'center', padding: 40, color: '#9A8E85' }}>Cargando...</div>
-      ) : vendedores.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: 40, color: '#9A8E85', background: '#fff', borderRadius: 9, border: '1px solid #DDD8CF' }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>🧑‍💼</div>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>No hay vendedores registrados</div>
+      <Tarjeta>
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 10,
+          }}
+        >
+          <h3 style={{ color: COLOR, margin: 0 }}>📋 Tareas pendientes</h3>
+
+          <button style={boton}>
+            ➕ Nuevo empleado
+          </button>
         </div>
-      ) : (
-        <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F4F1ED' }}>
-                {['Nombre','Teléfono','Tipo comisión','Comisión','Estado','Acciones'].map(h => (
-                  <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
-                ))}
+
+        <ul style={{ lineHeight: 2 }}>
+          <li>Renovar documentos próximos a vencer.</li>
+          <li>Registrar capacitaciones.</li>
+          <li>Entregar dotaciones pendientes.</li>
+          <li>Actualizar expedientes incompletos.</li>
+        </ul>
+
+      </Tarjeta>
+
+      {/* Buscador */}
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          background: "#fff",
+          borderRadius: 10,
+          padding: "10px 15px",
+          marginBottom: 20,
+        }}
+      >
+        <span style={{ fontSize: 18 }}>🔍</span>
+
+        <input
+          value={busqueda}
+          onChange={(e) => setBusqueda(e.target.value)}
+          placeholder="Buscar por código, nombre o cédula"
+          style={{
+            border: "none",
+            outline: "none",
+            background: "transparent",
+            marginLeft: 10,
+            width: "100%",
+            fontSize: 15,
+          }}
+        />
+      </div>
+
+      {/* Tabla */}
+
+      <Tarjeta>
+
+        <table width="100%" cellPadding={12}>
+
+          <thead style={{ background: COLOR, color: "#fff" }}>
+            <tr>
+              <th align="left">Código</th>
+              <th align="left">Empleado</th>
+              <th align="left">Cargo</th>
+              <th align="center">Estado</th>
+            </tr>
+          </thead>
+
+          <tbody>
+
+            {filtrados.map((emp) => (
+
+              <tr
+                key={emp.id}
+                onClick={() => setEmpleado(emp)}
+                style={{
+                  cursor: "pointer",
+                  borderBottom: "1px solid #eee",
+                }}
+              >
+                <td>{emp.codigo}</td>
+
+                <td>
+                  {emp.nombres} {emp.apellidos}
+                </td>
+
+                <td>{emp.cargo}</td>
+
+                <td align="center">
+                  <Badge estado={emp.estado} />
+                </td>
+
               </tr>
-            </thead>
-            <tbody>
-              {vendedores.map(v => (
-                <tr key={v.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{v.nombre}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13 }}>{v.telefono || '—'}</td>
-                  <td style={{ padding: '11px 16px' }}>
-                    <span style={{ background: v.comision_tipo === 'porcentaje' ? '#E8F0FB' : '#E8F7EF', color: v.comision_tipo === 'porcentaje' ? '#1A5FA8' : '#1A9156', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
-                      {v.comision_tipo === 'porcentaje' ? 'Porcentaje' : 'Valor fijo'}
-                    </span>
-                  </td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600 }}>
-                    {v.comision_tipo === 'porcentaje'
-                      ? `${v.comision_porcentaje}%`
-                      : `$${v.comision_valor_fijo?.toLocaleString()}`
-                    }
-                  </td>
-                  <td style={{ padding: '11px 16px' }}>
-                    <button onClick={() => toggleActivo(v)} style={{ background: v.activo ? '#E8F7EF' : '#FCEAEA', color: v.activo ? '#1A9156' : '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                      {v.activo ? '✓ Activo' : '✗ Inactivo'}
-                    </button>
-                  </td>
-                  <td style={{ padding: '8px 16px' }}>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button onClick={() => abrirEditar(v)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        ✏️ Editar
-                      </button>
-                      <button onClick={() => eliminar(v)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        🗑️
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+
+            ))}
+
+          </tbody>
+
+        </table>
+
+      </Tarjeta>
+
     </div>
-  )
+  );
 }
+
+function FichaEmpleado({ empleado, volver, seccion, setSeccion }) {
+
+  const menu = [
+    { id: "info", texto: "👤 Información" },
+    { id: "laboral", texto: "💼 Laboral" },
+    { id: "documentos", texto: "📂 Documentos" },
+    { id: "dotacion", texto: "👕 Dotación" },
+    { id: "capacitaciones", texto: "🎓 Capacitaciones" },
+    { id: "historial", texto: "🕒 Historial" },
+  ];
+
+  return (
+
+    <div
+      style={{
+        display: "flex",
+        background: FONDO,
+        minHeight: "100vh",
+      }}
+    >
+
+      {/* Menú lateral */}
+
+      <div
+        style={{
+          width: 250,
+          background: "#fff",
+          padding: 20,
+          borderRight: "1px solid #ddd",
+        }}
+      >
+
+        <button onClick={volver} style={botonSecundario}>
+          ⬅ Volver
+        </button>
+
+        <div style={{ textAlign: "center", marginTop: 20 }}>
+
+          <div
+            style={{
+              width: 90,
+              height: 90,
+              borderRadius: "50%",
+              background: "#ddd",
+              margin: "auto",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 40,
+            }}
+          >
+            👤
+          </div>
+
+          <h3>{empleado.codigo}</h3>
+
+          <strong>
+            {empleado.nombres} {empleado.apellidos}
+          </strong>
+
+          <p>{empleado.cargo}</p>
+
+          <Badge estado={empleado.estado} />
+
+        </div>
+
+        <div style={{ marginTop: 25 }}>
+
+          {menu.map((item) => (
+
+            <div
+              key={item.id}
+              onClick={() => setSeccion(item.id)}
+              style={{
+                padding: 12,
+                borderRadius: 10,
+                cursor: "pointer",
+                marginBottom: 8,
+                background: seccion === item.id ? COLOR : "transparent",
+                color: seccion === item.id ? "#fff" : "#444",
+                fontWeight: seccion === item.id ? "bold" : "normal",
+              }}
+            >
+              {item.texto}
+            </div>
+
+          ))}
+
+        </div>
+
+      </div>
+
+      {/* Contenido */}
+
+      <div style={{ flex: 1, padding: 30 }}>
+
+        {seccion === "info" && (
+          <>
+            <h2 style={{ color: COLOR }}>Información Personal</h2>
+
+            <Tarjeta>
+              <Campo label="Cédula" valor={empleado.cedula} />
+              <Campo label="Teléfono" valor={empleado.telefono} />
+              <Campo label="Dirección" valor={empleado.direccion} />
+              <Campo label="Correo" valor={empleado.correo} />
+            </Tarjeta>
+
+            <Tarjeta>
+
+              <h3 style={{ color: COLOR }}>Contacto de emergencia</h3>
+
+              <Campo label="Nombre" valor={empleado.contacto_nombre} />
+              <Campo label="Parentesco" valor={empleado.contacto_parentesco} />
+              <Campo label="Teléfono" valor={empleado.contacto_telefono} />
+
+            </Tarjeta>
+          </>
+        )}
+
+        {seccion === "laboral" && (
+
+          <>
+            <h2 style={{ color: COLOR }}>Información Laboral</h2>
+
+            <Tarjeta>
+
+              <Campo label="Cargo" valor={empleado.cargo} />
+              <Campo label="Área" valor={empleado.area} />
+              <Campo label="Contrato" valor={empleado.tipo_contrato} />
+              <Campo
+                label="Salario"
+                valor={`$${Number(empleado.salario || 0).toLocaleString("es-CO")}`}
+              />
+              <Campo label="Ingreso" valor={empleado.fecha_ingreso} />
+
+            </Tarjeta>
+          </>
+        )}
+
+        {seccion === "documentos" && (
+          <>
+            <h2 style={{ color: COLOR }}>Documentos</h2>
+
+            <Tarjeta>
+              Aquí aparecerán los documentos con su semáforo de vencimiento.
+            </Tarjeta>
+          </>
+        )}
+
+        {seccion === "dotacion" && (
+          <>
+            <h2 style={{ color: COLOR }}>Dotación</h2>
+
+            <Tarjeta>
+
+              <Campo label="Talla camisa" valor={empleado.talla_camisa} />
+              <Campo label="Talla pantalón" valor={empleado.talla_pantalon} />
+              <Campo label="Talla botas" valor={empleado.talla_botas} />
+
+            </Tarjeta>
+          </>
+        )}
+
+        {seccion === "capacitaciones" && (
+          <>
+            <h2 style={{ color: COLOR }}>Capacitaciones</h2>
+
+            <Tarjeta>
+              Aquí aparecerán las capacitaciones registradas.
+            </Tarjeta>
+          </>
+        )}
+
+        {seccion === "historial" && (
+          <>
+            <h2 style={{ color: COLOR }}>Historial</h2>
+
+            <Tarjeta>
+              Línea de tiempo automática del empleado.
+            </Tarjeta>
+          </>
+        )}
+
+      </div>
+
+    </div>
+
+  );
+}
+
+function Tarjeta({ children }) {
+  return (
+    <div
+      style={{
+        background: "#fff",
+        borderRadius: 15,
+        padding: 20,
+        marginBottom: 20,
+        boxShadow: "0 2px 8px rgba(0,0,0,.05)",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Campo({ label, valor }) {
+  return (
+    <div style={{ marginBottom: 15 }}>
+      <strong>{label}</strong>
+      <div>{valor || "-"}</div>
+    </div>
+  );
+}
+
+function KPI({ icon, valor, titulo }) {
+  return (
+    <div
+      style={{
+        background: "#fff",
+        borderRadius: 15,
+        padding: 20,
+        display: "flex",
+        gap: 15,
+        alignItems: "center",
+        boxShadow: "0 2px 8px rgba(0,0,0,.05)",
+      }}
+    >
+      <div style={{ fontSize: 30 }}>{icon}</div>
+
+      <div>
+        <div style={{ fontSize: 28, fontWeight: "bold" }}>{valor}</div>
+        <div>{titulo}</div>
+      </div>
+    </div>
+  );
+}
+
+function Badge({ estado }) {
+  const colores = {
+    ACTIVO: "#16a34a",
+    RETIRADO: "#6b7280",
+    VACACIONES: "#2563eb",
+  };
+
+  return (
+    <span
+      style={{
+        background: colores[estado] || "#888",
+        color: "#fff",
+        padding: "5px 12px",
+        borderRadius: 20,
+        fontSize: 12,
+      }}
+    >
+      {estado}
+    </span>
+  );
+}
+
+const boton = {
+  background: COLOR,
+  color: "#fff",
+  border: "none",
+  borderRadius: 10,
+  padding: "10px 16px",
+  cursor: "pointer",
+};
+
+const botonSecundario = {
+  background: "#eee",
+  border: "none",
+  borderRadius: 10,
+  padding: "8px 14px",
+  cursor: "pointer",
+};
