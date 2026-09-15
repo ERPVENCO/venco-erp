@@ -548,61 +548,63 @@ export default function ProductoTerminado() {
         </div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F4F1ED' }}>
-                {['Foto','Código','Nombre','Familia','Presentación','Precio 1','Precio 2','Precio 3','Stock','Receta','Estado','Acciones'].map(h => (
-                  <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {productosFiltrados.map(p => {
-                const estado = estadoStock(p.stock_actual, p.stock_minimo)
-                return (
-                  <tr key={p.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                    <td style={{ padding: '8px 16px' }}>
-                      {p.foto_url
-                        ? <img src={p.foto_url} alt={p.nombre} style={{ width: 40, height: 40, borderRadius: 6, objectFit: 'cover' }} />
-                        : <div style={{ width: 40, height: 40, borderRadius: 6, background: '#F4F1ED', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>🌭</div>
-                      }
-                    </td>
-                    <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600 }}>{p.codigo}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{p.nombre}</td>
-                    <td style={{ padding: '11px 16px' }}>
-                      <span style={{ background: '#FCEAEA', color: '#B22222', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600 }}>{p.familia}</span>
-                    </td>
-                    <td style={{ padding: '11px 16px', fontSize: 13 }}>{p.presentacion}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>${p.precio_kg?.toLocaleString()}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.precio2 ? '$' + p.precio2?.toLocaleString() : '—'}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.precio3 ? '$' + p.precio3?.toLocaleString() : '—'}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.stock_actual}</td>
-                    <td style={{ padding: '11px 16px' }}>
-                      <span style={{ background: p.receta_tipo === 'libre' ? '#E8F0FB' : '#F0ECE5', color: p.receta_tipo === 'libre' ? '#1A5FA8' : '#5A4F47', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
-                        {p.receta_tipo === 'libre' ? 'Libre' : 'Fija'}
-                      </span>
-                    </td>
-                    <td style={{ padding: '11px 16px' }}>
-                      <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>
-                    </td>
-                    <td style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button onClick={() => setProductoDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          👁️
-                        </button>
-                        <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          ✏️
-                        </button>
-                        <button onClick={() => setProductoAEliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          🗑️
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            <table style={{ width: '100%', minWidth: 1150, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#F4F1ED' }}>
+                  {['Foto','Código','Nombre','Familia','Presentación','Precio 1','Precio 2','Precio 3','Stock','Receta','Estado','Acciones'].map(h => (
+                    <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {productosFiltrados.map(p => {
+                  const estado = estadoStock(p.stock_actual, p.stock_minimo)
+                  return (
+                    <tr key={p.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
+                      <td style={{ padding: '8px 16px' }}>
+                        {p.foto_url
+                          ? <img src={p.foto_url} alt={p.nombre} style={{ width: 40, height: 40, borderRadius: 6, objectFit: 'cover' }} />
+                          : <div style={{ width: 40, height: 40, borderRadius: 6, background: '#F4F1ED', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>🌭</div>
+                        }
+                      </td>
+                      <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600, whiteSpace: 'nowrap' }}>{p.codigo}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>{p.nombre}</td>
+                      <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                        <span style={{ background: '#FCEAEA', color: '#B22222', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600 }}>{p.familia}</span>
+                      </td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{p.presentacion}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>${p.precio_kg?.toLocaleString()}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.precio2 ? '$' + p.precio2?.toLocaleString() : '—'}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.precio3 ? '$' + p.precio3?.toLocaleString() : '—'}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.stock_actual}</td>
+                      <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                        <span style={{ background: p.receta_tipo === 'libre' ? '#E8F0FB' : '#F0ECE5', color: p.receta_tipo === 'libre' ? '#1A5FA8' : '#5A4F47', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
+                          {p.receta_tipo === 'libre' ? 'Libre' : 'Fija'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                        <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>
+                      </td>
+                      <td style={{ padding: '8px 16px' }}>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button onClick={() => setProductoDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            👁️
+                          </button>
+                          <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            ✏️
+                          </button>
+                          <button onClick={() => setProductoAEliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            🗑️
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

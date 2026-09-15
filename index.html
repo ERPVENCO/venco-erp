@@ -1,10 +1,26 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>venco-erp</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Ahumados M&Y - Sistema ERP</title>
+
+    <!-- PWA: manifest -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!-- Color de la barra del navegador / status bar (Android) -->
+    <meta name="theme-color" content="#B22222" />
+
+    <!-- Fuerza modo claro: evita que el navegador invierta el color del texto
+         en inputs/selects cuando el celular tiene el modo oscuro del sistema activado -->
+    <meta name="color-scheme" content="light" />
+
+    <!-- iOS: permite modo standalone (sin barra de Safari) -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Ahumados M&Y" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
   </head>
   <body>
     <div id="root"></div>

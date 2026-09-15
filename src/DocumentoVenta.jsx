@@ -66,11 +66,37 @@ export default function DocumentoVenta({ venta, onCerrar }) {
   }
 
   // --- IMPRESIÓN ---
-  // Nota: "half-letter" NO es una palabra clave válida de CSS @page en la mayoría
-  // de los navegadores, por eso no se estaba aplicando el tamaño. Se reemplaza
-  // por las dimensiones explícitas en mm (139.7mm x 215.9mm = media carta).
+  // En pantalla el documento usa dorado/beige. SOLO para la versión que se
+  // manda a imprimir esos tonos se reemplazan por negro/gris oscuro (mejor
+  // contraste en blanco y negro). En pantalla no cambia nada.
+  //
+  // IMPORTANTE: cuando el navegador serializa el innerHTML de un elemento
+  // con estilos en línea, convierte automáticamente los colores hex a
+  // formato rgb(...). Por eso mapeamos AMBOS formatos (hex y rgb) para
+  // que el reemplazo funcione siempre, sin importar cómo los haya
+  // normalizado el navegador.
   const imprimir = () => {
-    const contenido = document.getElementById('documento').innerHTML
+    let contenido = document.getElementById('documento').innerHTML
+
+    const mapaColores = [
+      ['#9C7A29', 'rgb(156, 122, 41)', '#000000'],   // dorado → negro
+      ['#D9C7A3', 'rgb(217, 199, 163)', '#000000'],  // borde beige → negro
+      ['#F7F1E0', 'rgb(247, 241, 224)', '#F2F2F2'],  // fondo beige claro → gris muy claro
+      ['#2A2A2A', 'rgb(42, 42, 42)', '#000000'],     // texto general → negro
+      ['#6B6259', 'rgb(107, 98, 89)', '#000000'],    // texto secundario → negro
+      ['#E8DCC0', 'rgb(232, 220, 192)', '#000000'],  // línea beige → negro
+      ['#7A7268', 'rgb(122, 114, 104)', '#000000'],  // etiquetas (Cliente:, Teléfono:, etc.) → negro
+      ['#9A8E85', 'rgb(154, 142, 133)', '#000000'],  // placeholders (Cargando..., No registra) → negro
+      ['#F0EAE2', 'rgb(240, 234, 226)', '#DDDDDD'],  // línea divisoria de la tabla → gris claro
+      ['#333', 'rgb(51, 51, 51)', '#000000'],        // borde de firmas → negro
+      ['#444', 'rgb(68, 68, 68)', '#000000'],        // texto de firmas → negro
+    ]
+
+    mapaColores.forEach(([hex, rgb, destino]) => {
+      contenido = contenido.split(hex).join(destino)
+      contenido = contenido.split(rgb).join(destino)
+    })
+
     const ventanaImpresion = window.open('', '_blank')
     ventanaImpresion.document.write(`
       <html>
@@ -87,13 +113,13 @@ export default function DocumentoVenta({ venta, onCerrar }) {
               font-family: 'Georgia', 'Times New Roman', serif;
               font-size: 10px;
               width: 197mm;
-              color: #2A2A2A;
+              color: #000000;
               margin: 0;
             }
             table { width: 100%; border-collapse: collapse; }
-            th { background: #9C7A29; color: #fff; padding: 6px 7px; text-align: left; font-size: 9.5px; letter-spacing: 0.3px; }
+            th { background: #000000; color: #fff; padding: 6px 7px; text-align: left; font-size: 9.5px; letter-spacing: 0.3px; }
             td { padding: 5px 7px; border-bottom: 1px solid #eee; font-size: 10px; }
-            img { max-width: 48px; }
+            img { max-width: 100%; filter: grayscale(1) contrast(1.2); }
           </style>
         </head>
         <body>${contenido}</body>
@@ -249,7 +275,7 @@ export default function DocumentoVenta({ venta, onCerrar }) {
     borderBottom: '1px solid #f0f0f0', cursor: 'pointer', textAlign: 'left', color: '#333'
   }
 
-  // Tokens de estilo "formal" reutilizables
+  // Tokens de estilo "formal" reutilizables — dorado/beige, SOLO para pantalla
   const dorado = '#9C7A29'
   const cajaBase = { border: '1px solid #D9C7A3', borderRadius: 4, padding: '6px 9px', background: '#fff' }
   const tituloCaja = {
@@ -321,7 +347,9 @@ export default function DocumentoVenta({ venta, onCerrar }) {
           {/* Encabezado */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8, paddingBottom: 7, borderBottom: `3px double ${dorado}` }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <img src={EMPRESA.logo} alt="Logo" style={{ width: 100, height: 100, objectFit: 'contain' }} />
+              <div style={{ width: 100, height: 100, overflow: 'hidden', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <img src={EMPRESA.logo} alt="Logo" style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'scale(1.0)' }} />
+              </div>
               <div>
                 <div style={{ fontSize: 15, fontWeight: 700, color: dorado, letterSpacing: '0.4px' }}>{EMPRESA.nombre}</div>
                 <div style={{ fontSize: 9, color: '#6B6259', marginTop: 1, lineHeight: 1.3 }}>

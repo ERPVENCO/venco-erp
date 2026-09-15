@@ -337,59 +337,61 @@ export default function MateriaPrima() {
         </div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F4F1ED' }}>
-                {['Código','Nombre','Categoría','Unidad','Stock actual','Stock mínimo','Costo promedio','Último costo','Caducidad','Estado','Acciones'].map(h => (
-                  <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {productosFiltrados.map(p => {
-                const estado = estadoStock(p.stock_actual, p.stock_minimo)
-                return (
-                  <tr key={p.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                    <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace' }}>{p.codigo}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{p.nombre}</td>
-                    <td style={{ padding: '11px 16px' }}>
-                      <span style={{ background: categoriaColor(p.categoria_mp) + '20', color: categoriaColor(p.categoria_mp), padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
-                        {categoriaNombre(p.categoria_mp)}
-                      </span>
-                    </td>
-                    <td style={{ padding: '11px 16px', fontSize: 13 }}>{p.unidad}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.stock_actual} {p.unidad}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.stock_minimo} {p.unidad}</td>
-                    {/* Costo promedio ponderado — se actualiza automáticamente con cada compra */}
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#1A5FA8' }}>
-                      ${(p.costo_promedio ?? p.precio_kg)?.toLocaleString('es-CO')}
-                    </td>
-                    {/* Último costo pagado en la compra más reciente */}
-                    <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#9A8E85' }}>
-                      {p.ultimo_costo ? `$${p.ultimo_costo?.toLocaleString('es-CO')}` : '—'}
-                    </td>
-                    <td style={{ padding: '11px 16px', fontSize: 12, color: p.fecha_caducidad ? '#B22222' : '#9A8E85' }}>{p.fecha_caducidad || '—'}</td>
-                    <td style={{ padding: '11px 16px' }}>
-                      <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>
-                    </td>
-                    <td style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button onClick={() => setMateriaDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          👁️
-                        </button>
-                        <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          ✏️
-                        </button>
-                        <button onClick={() => eliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          🗑️
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            <table style={{ width: '100%', minWidth: 1150, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#F4F1ED' }}>
+                  {['Código','Nombre','Categoría','Unidad','Stock actual','Stock mínimo','Costo promedio','Último costo','Caducidad','Estado','Acciones'].map(h => (
+                    <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {productosFiltrados.map(p => {
+                  const estado = estadoStock(p.stock_actual, p.stock_minimo)
+                  return (
+                    <tr key={p.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
+                      <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.codigo}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>{p.nombre}</td>
+                      <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                        <span style={{ background: categoriaColor(p.categoria_mp) + '20', color: categoriaColor(p.categoria_mp), padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
+                          {categoriaNombre(p.categoria_mp)}
+                        </span>
+                      </td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{p.unidad}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.stock_actual} {p.unidad}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.stock_minimo} {p.unidad}</td>
+                      {/* Costo promedio ponderado — se actualiza automáticamente con cada compra */}
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#1A5FA8', whiteSpace: 'nowrap' }}>
+                        ${(p.costo_promedio ?? p.precio_kg)?.toLocaleString('es-CO')}
+                      </td>
+                      {/* Último costo pagado en la compra más reciente */}
+                      <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#9A8E85', whiteSpace: 'nowrap' }}>
+                        {p.ultimo_costo ? `$${p.ultimo_costo?.toLocaleString('es-CO')}` : '—'}
+                      </td>
+                      <td style={{ padding: '11px 16px', fontSize: 12, color: p.fecha_caducidad ? '#B22222' : '#9A8E85', whiteSpace: 'nowrap' }}>{p.fecha_caducidad || '—'}</td>
+                      <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                        <span style={{ background: estado.bg, color: estado.color, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>{estado.texto}</span>
+                      </td>
+                      <td style={{ padding: '8px 16px' }}>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button onClick={() => setMateriaDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            👁️
+                          </button>
+                          <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            ✏️
+                          </button>
+                          <button onClick={() => eliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            🗑️
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

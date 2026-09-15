@@ -21,6 +21,8 @@ export default function Ventas() {
   const [filtroTipo, setFiltroTipo] = useState('todos')
   const [items, setItems] = useState([])
   const [guardando, setGuardando] = useState(false)
+  // Detecta pantalla táctil — así una ventana de PC angosta no activa el scroll de tabla
+  const [isMobile] = useState(() => window.matchMedia('(pointer: coarse)').matches)
 
   // Edición
   const [editandoId, setEditandoId] = useState(null)
@@ -1235,63 +1237,65 @@ export default function Ventas() {
         </div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F4F1ED' }}>
-                {['Folio','Cliente','Tipo','Estado','Pago','Vendedor','Total','Fecha','Acciones'].map(h => (
-                  <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {ventasFiltradas.map(v => {
-                return (
-                  <tr key={v.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                    <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222' }}>{v.folio}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{v.cliente_nombre}</td>
-                    <td style={{ padding: '11px 16px' }}>
-                      <span style={{ background: v.tipo === 'venta' ? '#E8F7EF' : '#FEF3DC', color: v.tipo === 'venta' ? '#1A9156' : '#C07D00', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
-                        {v.tipo === 'venta' ? 'Venta' : 'Remisión'}
-                      </span>
-                    </td>
-                    <td style={{ padding: '11px 16px' }}>
-                      {badgeEstado(v)}
-                    </td>
-                    <td style={{ padding: '11px 16px', fontSize: 13 }}>{v.metodo_pago || '—'}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13 }}>{v.vendedor || '—'}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#1A9156' }}>${v.total?.toLocaleString()}</td>
-                    <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace' }}>
-                      {new Date(v.creado_en).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' })}
-                    </td>
-                    <td style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button onClick={() => verDetalleVenta(v)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          👁️
-                        </button>
-                        <button onClick={() => setVentaImprimir(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          🖨️
-                        </button>
-                        <button onClick={() => abrirTrazabilidad(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          🚚
-                        </button>
-                        <button onClick={() => solicitarEdicion(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          ✏️
-                        </button>
-                        <button onClick={() => setVentaAEliminar(v)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                          🗑️
-                        </button>
-                        {v.tipo === 'remision' && v.estado === 'pendiente' && (
-  <button onClick={() => setVentaAFacturar(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-    🧾
-  </button>
-)}
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            <table style={{ width: '100%', minWidth: 780, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#F4F1ED' }}>
+                  {['Folio','Cliente','Tipo','Estado','Pago','Vendedor','Total','Fecha','Acciones'].map(h => (
+                    <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {ventasFiltradas.map(v => {
+                  return (
+                    <tr key={v.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
+                      <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222', whiteSpace: 'nowrap' }}>{v.folio}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>{v.cliente_nombre}</td>
+                      <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                        <span style={{ background: v.tipo === 'venta' ? '#E8F7EF' : '#FEF3DC', color: v.tipo === 'venta' ? '#1A9156' : '#C07D00', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
+                          {v.tipo === 'venta' ? 'Venta' : 'Remisión'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                        {badgeEstado(v)}
+                      </td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{v.metodo_pago || '—'}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{v.vendedor || '—'}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#1A9156', whiteSpace: 'nowrap' }}>${v.total?.toLocaleString()}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+                        {new Date(v.creado_en).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' })}
+                      </td>
+                      <td style={{ padding: '8px 16px' }}>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button onClick={() => verDetalleVenta(v)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            👁️
+                          </button>
+                          <button onClick={() => setVentaImprimir(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            🖨️
+                          </button>
+                          <button onClick={() => abrirTrazabilidad(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            🚚
+                          </button>
+                          <button onClick={() => solicitarEdicion(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            ✏️
+                          </button>
+                          <button onClick={() => setVentaAEliminar(v)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                            🗑️
+                          </button>
+                          {v.tipo === 'remision' && v.estado === 'pendiente' && (
+    <button onClick={() => setVentaAFacturar(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+      🧾
+    </button>
+  )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

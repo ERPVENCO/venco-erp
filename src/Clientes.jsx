@@ -1,6 +1,13 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
 
+// En PC deja la tabla intacta (sin scroll propio); en celular la envuelve
+// en un contenedor con scroll horizontal para poder llegar a "Acciones".
+function TablaScroll({ isMobile, children }) {
+  if (!isMobile) return <>{children}</>
+  return <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>{children}</div>
+}
+
 export default function Clientes() {
   const [clientes, setClientes] = useState([])
   const [loading, setLoading] = useState(true)
@@ -8,6 +15,8 @@ export default function Clientes() {
   const [filtroTipo, setFiltroTipo] = useState('todos')
   const [guardando, setGuardando] = useState(false)
   const [clienteDetalle, setClienteDetalle] = useState(null)
+  // Detecta pantalla táctil — así una ventana de PC angosta no activa el scroll de tabla
+  const [isMobile] = useState(() => window.matchMedia('(pointer: coarse)').matches)
   const [nuevo, setNuevo] = useState({
     tipo_cliente: 'registrado',
     empresa: '', encargado: '', cedula_nit: '',
@@ -239,46 +248,48 @@ export default function Clientes() {
         </div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F4F1ED' }}>
-                {['#','Empresa','Encargado','Dirección','Teléfono','Tipo','Crédito','Saldo','Detalle','Eliminar'].map(h => (
-                  <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {clientesFiltrados.map(c => (
-                <tr key={c.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                  <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600 }}>{c.codigo_manual}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>
-                    {c.empresa}<br/>
-                    <span style={{ fontSize: 11, color: '#9A8E85', fontWeight: 400 }}>{c.cedula_nit}</span>
-                  </td>
-                  <td style={{ padding: '11px 16px', fontSize: 13 }}>{c.encargado || '—'}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13 }}>{c.direccion || '—'}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{c.telefono}</td>
-                  <td style={{ padding: '11px 16px' }}>
-                    <span style={{ background: c.tipo_cliente === 'registrado' ? '#E8F0FB' : '#FEF3DC', color: c.tipo_cliente === 'registrado' ? '#1A5FA8' : '#C07D00', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600 }}>
-                      {c.tipo_cliente === 'registrado' ? 'Registrado' : 'Temporal'}
-                    </span>
-                  </td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{c.limite_credito ? '$' + c.limite_credito.toLocaleString() : '—'}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', color: c.saldo_pendiente > 0 ? '#B22222' : '#1A9156' }}>${(c.saldo_pendiente || 0).toLocaleString()}</td>
-                  <td style={{ padding: '8px 16px' }}>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button onClick={() => setClienteDetalle(c)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        👁️ VER
-                      </button>
-                      <button onClick={() => eliminar(c)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        🗑️
-                      </button>
-                    </div>
-                  </td>
+          <TablaScroll isMobile={isMobile}>
+            <table style={{ width: '100%', ...(isMobile ? { minWidth: 900 } : {}), borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#F4F1ED' }}>
+                  {['#','Empresa','Encargado','Dirección','Teléfono','Tipo','Crédito','Saldo','Detalle','Eliminar'].map(h => (
+                    <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {clientesFiltrados.map(c => (
+                  <tr key={c.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
+                    <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600, whiteSpace: 'nowrap' }}>{c.codigo_manual}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                      {c.empresa}<br/>
+                      <span style={{ fontSize: 11, color: '#9A8E85', fontWeight: 400 }}>{c.cedula_nit}</span>
+                    </td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{c.encargado || '—'}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{c.direccion || '—'}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{c.telefono}</td>
+                    <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                      <span style={{ background: c.tipo_cliente === 'registrado' ? '#E8F0FB' : '#FEF3DC', color: c.tipo_cliente === 'registrado' ? '#1A5FA8' : '#C07D00', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600 }}>
+                        {c.tipo_cliente === 'registrado' ? 'Registrado' : 'Temporal'}
+                      </span>
+                    </td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{c.limite_credito ? '$' + c.limite_credito.toLocaleString() : '—'}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', color: c.saldo_pendiente > 0 ? '#B22222' : '#1A9156', whiteSpace: 'nowrap' }}>${(c.saldo_pendiente || 0).toLocaleString()}</td>
+                    <td style={{ padding: '8px 16px' }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={() => setClienteDetalle(c)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          👁️ VER
+                        </button>
+                        <button onClick={() => eliminar(c)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          🗑️
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TablaScroll>
         </div>
       )}
     </div>

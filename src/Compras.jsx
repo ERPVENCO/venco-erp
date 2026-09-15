@@ -1,6 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Fragment } from 'react'
 import { supabase } from './supabase'
 import ModalEliminar from './ModalEliminar'
+
+// En PC deja la tabla intacta (sin scroll propio); en celular la envuelve
+// en un contenedor con scroll horizontal para poder llegar a "Acciones".
+function TablaScroll({ isMobile, children }) {
+  if (!isMobile) return <>{children}</>
+  return <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>{children}</div>
+}
 
 const hoyISO = () => new Date().toISOString().split('T')[0]
 
@@ -22,6 +29,8 @@ export default function Compras() {
   const [pidiendoClave, setPidiendoClave] = useState(null)
   const [claveInput, setClaveInput] = useState('')
   const [claveError, setClaveError] = useState('')
+  // Detecta pantalla táctil — así una ventana de PC angosta no activa el scroll de tabla
+  const [isMobile] = useState(() => window.matchMedia('(pointer: coarse)').matches)
 
   const [compra, setCompra] = useState({
     proveedor_id: '', factura_proveedor: '',
@@ -416,28 +425,30 @@ export default function Compras() {
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>TOTAL</span><br/><b style={{ fontSize: 16, color: '#B22222' }}>${compraDetalle.total?.toLocaleString()}</b></div>
             </div>
             <div style={{ fontSize: 12, fontWeight: 600, color: '#B22222', marginBottom: 8 }}>PRODUCTOS COMPRADOS</div>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginBottom: 16 }}>
-              <thead>
-                <tr style={{ background: '#F4F1ED' }}>
-                  {['Producto','Lote generado','Cantidad','Costo unit.','Subtotal'].map(h => (
-                    <th key={h} style={{ padding: '7px 10px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {compraItems.length === 0 ? (
-                  <tr><td colSpan={5} style={{ padding: 12, textAlign: 'center', color: '#9A8E85' }}>Sin productos</td></tr>
-                ) : compraItems.map((item, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                    <td style={{ padding: '8px 10px', fontWeight: 500 }}>{item.nombre_producto}</td>
-                    <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 11, color: '#1A5FA8', fontWeight: 600 }}>{item.codigo_lote}</td>
-                    <td style={{ padding: '8px 10px' }}>{item.cantidad} {item.unidad}</td>
-                    <td style={{ padding: '8px 10px', fontFamily: 'monospace' }}>${item.costo_unitario?.toLocaleString()}</td>
-                    <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontWeight: 600 }}>${item.subtotal?.toLocaleString()}</td>
+            <TablaScroll isMobile={isMobile}>
+              <table style={{ width: '100%', ...(isMobile ? { minWidth: 500 } : {}), borderCollapse: 'collapse', fontSize: 12, marginBottom: 16 }}>
+                <thead>
+                  <tr style={{ background: '#F4F1ED' }}>
+                    {['Producto','Lote generado','Cantidad','Costo unit.','Subtotal'].map(h => (
+                      <th key={h} style={{ padding: '7px 10px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', whiteSpace: 'nowrap' }}>{h}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {compraItems.length === 0 ? (
+                    <tr><td colSpan={5} style={{ padding: 12, textAlign: 'center', color: '#9A8E85' }}>Sin productos</td></tr>
+                  ) : compraItems.map((item, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid #DDD8CF' }}>
+                      <td style={{ padding: '8px 10px', fontWeight: 500 }}>{item.nombre_producto}</td>
+                      <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 11, color: '#1A5FA8', fontWeight: 600 }}>{item.codigo_lote}</td>
+                      <td style={{ padding: '8px 10px' }}>{item.cantidad} {item.unidad}</td>
+                      <td style={{ padding: '8px 10px', fontFamily: 'monospace' }}>${item.costo_unitario?.toLocaleString()}</td>
+                      <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontWeight: 600 }}>${item.subtotal?.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TablaScroll>
             {compraDetalle.observaciones && <div style={{ fontSize: 12, color: '#9A8E85' }}><b>Observaciones:</b> {compraDetalle.observaciones}</div>}
           </div>
         </div>
@@ -703,38 +714,40 @@ export default function Compras() {
         </div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F4F1ED' }}>
-                {['Folio','Proveedor','Estado','Forma Pago','Total','Fecha','Acciones'].map(h => (
-                  <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {compras.map(c => (
-                <tr key={c.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                  <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222' }}>{c.folio}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>{c.proveedor_nombre}</td>
-                  <td style={{ padding: '11px 16px' }}>
-                    {badgeEstado(c)}
-                  </td>
-                  <td style={{ padding: '11px 16px', fontSize: 12 }}>{c.metodo_pago || '—'}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#B22222' }}>${c.total?.toLocaleString('es-CO')}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace' }}>
-                    {c.fecha_compra || new Date(c.creado_en).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' })}
-                  </td>
-                  <td style={{ padding: '8px 16px' }}>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button onClick={() => verDetalle(c)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>👁️</button>
-                      <button onClick={() => solicitarEdicion(c)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>✏️</button>
-                      <button onClick={() => setCompraAEliminar(c)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>🗑️</button>
-                    </div>
-                  </td>
+          <TablaScroll isMobile={isMobile}>
+            <table style={{ width: '100%', ...(isMobile ? { minWidth: 700 } : {}), borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#F4F1ED' }}>
+                  {['Folio','Proveedor','Estado','Forma Pago','Total','Fecha','Acciones'].map(h => (
+                    <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {compras.map(c => (
+                  <tr key={c.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
+                    <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222', whiteSpace: 'nowrap' }}>{c.folio}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>{c.proveedor_nombre}</td>
+                    <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                      {badgeEstado(c)}
+                    </td>
+                    <td style={{ padding: '11px 16px', fontSize: 12, whiteSpace: 'nowrap' }}>{c.metodo_pago || '—'}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#B22222', whiteSpace: 'nowrap' }}>${c.total?.toLocaleString('es-CO')}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+                      {c.fecha_compra || new Date(c.creado_en).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' })}
+                    </td>
+                    <td style={{ padding: '8px 16px' }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={() => verDetalle(c)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>👁️</button>
+                        <button onClick={() => solicitarEdicion(c)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>✏️</button>
+                        <button onClick={() => setCompraAEliminar(c)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>🗑️</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TablaScroll>
         </div>
       )}
     </div>

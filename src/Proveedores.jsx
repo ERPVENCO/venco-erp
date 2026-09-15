@@ -1,12 +1,21 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
 
+// En PC deja la tabla intacta (sin scroll propio); en celular la envuelve
+// en un contenedor con scroll horizontal para poder llegar a "Acciones".
+function TablaScroll({ isMobile, children }) {
+  if (!isMobile) return <>{children}</>
+  return <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>{children}</div>
+}
+
 export default function Proveedores() {
   const [proveedores, setProveedores] = useState([])
   const [loading, setLoading] = useState(true)
   const [mostrarForm, setMostrarForm] = useState(false)
   const [editando, setEditando] = useState(null)
   const [proveedorDetalle, setProveedorDetalle] = useState(null)
+  // Detecta pantalla táctil — así una ventana de PC angosta no activa el scroll de tabla
+  const [isMobile] = useState(() => window.matchMedia('(pointer: coarse)').matches)
   const [nuevo, setNuevo] = useState({
     empresa: '', encargado: '', nit: '', telefono: '', direccion: ''
   })
@@ -168,44 +177,46 @@ export default function Proveedores() {
         </div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F4F1ED' }}>
-                {['#','Empresa','Encargado','Teléfono','Saldo','Acciones'].map(h => (
-                  <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {proveedores.map(p => (
-                <tr key={p.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                  <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600 }}>{p.codigo_manual}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600 }}>
-                    {p.empresa}<br/>
-                    <span style={{ fontSize: 11, color: '#9A8E85', fontWeight: 400 }}>{p.nit}</span>
-                  </td>
-                  <td style={{ padding: '11px 16px', fontSize: 13 }}>{p.encargado || '—'}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace' }}>{p.telefono}</td>
-                  <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', color: p.saldo_pendiente > 0 ? '#B22222' : '#1A9156' }}>
-                    ${(p.saldo_pendiente || 0).toLocaleString()}
-                  </td>
-                  <td style={{ padding: '8px 16px' }}>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button onClick={() => setProveedorDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        👁️
-                      </button>
-                      <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        ✏️
-                      </button>
-                      <button onClick={() => eliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                        🗑️
-                      </button>
-                    </div>
-                  </td>
+          <TablaScroll isMobile={isMobile}>
+            <table style={{ width: '100%', ...(isMobile ? { minWidth: 620 } : {}), borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#F4F1ED' }}>
+                  {['#','Empresa','Encargado','Teléfono','Saldo','Acciones'].map(h => (
+                    <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {proveedores.map(p => (
+                  <tr key={p.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
+                    <td style={{ padding: '11px 16px', fontSize: 11, color: '#9A8E85', fontFamily: 'monospace', fontWeight: 600, whiteSpace: 'nowrap' }}>{p.codigo_manual}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                      {p.empresa}<br/>
+                      <span style={{ fontSize: 11, color: '#9A8E85', fontWeight: 400 }}>{p.nit}</span>
+                    </td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{p.encargado || '—'}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.telefono}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', color: p.saldo_pendiente > 0 ? '#B22222' : '#1A9156', whiteSpace: 'nowrap' }}>
+                      ${(p.saldo_pendiente || 0).toLocaleString()}
+                    </td>
+                    <td style={{ padding: '8px 16px' }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={() => setProveedorDetalle(p)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          👁️
+                        </button>
+                        <button onClick={() => abrirEditar(p)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          ✏️
+                        </button>
+                        <button onClick={() => eliminar(p)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                          🗑️
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TablaScroll>
         </div>
       )}
     </div>
