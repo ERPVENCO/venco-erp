@@ -1,6 +1,8 @@
 import { useState, useEffect, Fragment } from 'react'
 import { supabase } from './supabase'
 import ModalEliminar from './ModalEliminar'
+import ComprasPendientes from './ComprasPendientes'
+import { siguienteFolio, generarCodigoLote, trazAFila } from './recepcionUtils'
 
 // En PC deja la tabla intacta (sin scroll propio); en celular la envuelve
 // en un contenedor con scroll horizontal para poder llegar a "Acciones".
@@ -13,6 +15,8 @@ const hoyISO = () => new Date().toISOString().split('T')[0]
 
 export default function Compras() {
   const [compras, setCompras] = useState([])
+  const [pendientes, setPendientes] = useState([])
+  const [vista, setVista] = useState('compras') // 'compras' | 'pendientes'
   const [proveedores, setProveedores] = useState([])
   const [materiasPrimas, setMateriasPrimas] = useState([])
   const [loading, setLoading] = useState(true)
@@ -42,10 +46,15 @@ export default function Compras() {
 
   useEffect(() => { cargar(); cargarProveedores(); cargarMaterias() }, [])
 
+  // Compras completas en la lista normal; las pendientes (recepciones de Calidad) aparte
   const cargar = async () => {
     setLoading(true)
-    const { data } = await supabase.from('compras').select('*').order('creado_en', { ascending: false })
-    setCompras(data || [])
+    const [{ data: comp }, { data: pend }] = await Promise.all([
+      supabase.from('compras').select('*').neq('estado_registro', 'pendiente').order('creado_en', { ascending: false }),
+      supabase.from('compras').select('*').eq('estado_registro', 'pendiente').order('creado_en', { ascending: true })
+    ])
+    setCompras(comp || [])
+    setPendientes(pend || [])
     setLoading(false)
   }
 
@@ -57,20 +66,6 @@ export default function Compras() {
   const cargarMaterias = async () => {
     const { data } = await supabase.from('productos').select('*').eq('tipo_inventario', 'materia_prima').order('categoria_mp')
     setMateriasPrimas(data || [])
-  }
-
-  const siguienteFolio = async () => {
-    const { data } = await supabase.from('compras').select('folio').order('folio', { ascending: false }).limit(1)
-    if (!data || data.length === 0) return 'COM-0001'
-    const numero = parseInt(data[0].folio.replace('COM-', '')) + 1
-    return `COM-${String(numero).padStart(4, '0')}`
-  }
-
-  const generarCodigoLote = async (producto) => {
-    const prefijoCodigo = producto.codigo.split('-').slice(0, 2).join('-')
-    const { data } = await supabase.from('compra_items').select('codigo_lote').like('codigo_lote', `${prefijoCodigo}-L%`)
-    const siguiente = (data?.length || 0) + 1
-    return `${prefijoCodigo}-L${String(siguiente).padStart(4, '0')}`
   }
 
   const trazVacio = () => ({
@@ -165,13 +160,25 @@ export default function Compras() {
     setPidiendoClave(null)
     const { data: itemsC } = await supabase.from('compra_items').select('*').eq('compra_id', c.id)
 
+    // Un item se bloquea solo si su lote ya fue usado (o no se encuentra el lote)
+    const codigos = (itemsC || []).map(i => i.codigo_lote).filter(Boolean)
+    const { data: lotesC } = codigos.length
+      ? await supabase.from('lotes').select('codigo_lote, cantidad_inicial, cantidad_actual').in('codigo_lote', codigos)
+      : { data: [] }
+    const loteMap = {}
+    ;(lotesC || []).forEach(l => { loteMap[l.codigo_lote] = l })
+    const estaUsado = (i) => {
+      const l = loteMap[i.codigo_lote]
+      return !l || parseFloat(l.cantidad_actual) < parseFloat(l.cantidad_inicial)
+    }
+
     // Cargar trazabilidad existente para precargar el formulario
     const { data: trazC } = await supabase.from('trazabilidad_recepcion').select('*').eq('compra_id', c.id)
     const trazMap = {}
     ;(trazC || []).forEach(t => { trazMap[t.compra_item_id] = t })
 
     setEditandoId(c.id)
-    setCompraOriginal({ compra: c, items: itemsC || [] })
+    setCompraOriginal({ compra: c, items: itemsC || [], bloqueados: (itemsC || []).filter(estaUsado).map(i => i.id) })
     setCompra({
       proveedor_id: c.proveedor_id || '', factura_proveedor: c.factura_proveedor || '',
       fecha_compra: c.fecha_compra || c.creado_en?.split('T')[0] || hoyISO(),
@@ -181,6 +188,7 @@ export default function Compras() {
       descuento: c.descuento || 0, observaciones: c.observaciones || ''
     })
     setItems((itemsC || []).map(i => ({
+      id: i.id, codigo_lote: i.codigo_lote, bloqueado: estaUsado(i),
       producto_id: i.producto_id, nombre_producto: i.nombre_producto,
       codigo_producto: i.codigo_producto, cantidad: i.cantidad,
       unidad: i.unidad, costo_unitario: i.costo_unitario, subtotal: i.subtotal
@@ -208,55 +216,35 @@ export default function Compras() {
     setMostrarForm(true)
   }
 
-  const guardar = async () => {
-    if (!compra.proveedor_id) { alert('Selecciona un proveedor'); return }
-    if (items.length === 0) { alert('Agrega al menos un producto'); return }
-    if (items.some(i => !i.producto_id || !i.cantidad || !i.costo_unitario)) { alert('Completa todos los campos'); return }
-
-    const { subtotal, descuento, total } = calcularTotales()
-    if (!validarMontos(total)) return
-
-    setGuardando(true)
-    const proveedor = proveedores.find(p => p.id === compra.proveedor_id)
-    const { data: { user } } = await supabase.auth.getUser()
-    let compraId, folio
-
-    if (editandoId) {
-      await revertirCompra(compraOriginal.compra, compraOriginal.items)
-      folio = compraOriginal.compra.folio
-      compraId = editandoId
-      await supabase.from('compras').update({
-        proveedor_id: compra.proveedor_id, proveedor_nombre: proveedor?.empresa || '',
-        factura_proveedor: compra.factura_proveedor || null,
-        fecha_compra: compra.fecha_compra || hoyISO(),
-        estado: compra.estado, metodo_pago: compra.estado === 'credito' ? null : compra.metodo_pago,
-        tipo_cuenta1: compra.tipo_cuenta1 || null, monto1: parseFloat(compra.monto1) || 0,
-        tipo_cuenta2: compra.tipo_cuenta2 || null, monto2: parseFloat(compra.monto2) || 0,
-        subtotal, descuento, total, observaciones: compra.observaciones
-      }).eq('id', compraId)
-      await supabase.from('auditoria').insert([{
-        tabla: 'compras', accion: 'EDICIÓN',
-        descripcion: `${folio} — ${proveedor?.empresa} — Total nuevo: $${total.toLocaleString()}`,
-        datos_anteriores: compraOriginal.compra, usuario_email: user?.email || 'desconocido', fecha: new Date().toISOString()
-      }])
-    } else {
-      folio = await siguienteFolio()
-      const { data, error } = await supabase.from('compras').insert([{
-        folio, proveedor_id: compra.proveedor_id, proveedor_nombre: proveedor?.empresa || '',
-        factura_proveedor: compra.factura_proveedor || null,
-        fecha_compra: compra.fecha_compra || hoyISO(),
-        estado: compra.estado, metodo_pago: compra.estado === 'credito' ? null : compra.metodo_pago,
-        tipo_cuenta1: compra.tipo_cuenta1 || null, monto1: parseFloat(compra.monto1) || 0,
-        tipo_cuenta2: compra.tipo_cuenta2 || null, monto2: parseFloat(compra.monto2) || 0,
-        subtotal, descuento, total, observaciones: compra.observaciones, usuario_email: user?.email
-      }]).select()
-      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
-      compraId = data[0].id
+  // Crea los egresos (contado) o suma el saldo del proveedor (crédito)
+  const registrarPago = async (compraId, folio, proveedorNombre, total) => {
+    if (compra.estado === 'contado') {
+      if (compra.metodo_pago === 'efectivo') {
+        await supabase.from('egresos').insert([{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedorNombre}`, metodo_pago: 'efectivo', monto: total }])
+      } else if (compra.metodo_pago === 'transferencia') {
+        await supabase.from('egresos').insert([{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedorNombre}`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta1}`, monto: total }])
+      } else if (compra.metodo_pago === 'efectivo_transferencia') {
+        await supabase.from('egresos').insert([
+          { compra_id: compraId, concepto: `Compra ${folio} (efectivo)`, metodo_pago: 'efectivo', monto: parseFloat(compra.monto1) || 0 },
+          { compra_id: compraId, concepto: `Compra ${folio} (transferencia)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta2}`, monto: parseFloat(compra.monto2) || 0 }
+        ])
+      } else if (compra.metodo_pago === 'transferencia_transferencia') {
+        await supabase.from('egresos').insert([
+          { compra_id: compraId, concepto: `Compra ${folio} (transf. 1)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta1}`, monto: parseFloat(compra.monto1) || 0 },
+          { compra_id: compraId, concepto: `Compra ${folio} (transf. 2)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta2}`, monto: parseFloat(compra.monto2) || 0 }
+        ])
+      }
     }
 
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]
-      const traz = trazabilidad[i]
+    if (compra.estado === 'credito') {
+      const { data: provActual } = await supabase.from('proveedores').select('saldo_pendiente').eq('id', compra.proveedor_id).single()
+      await supabase.from('proveedores').update({ saldo_pendiente: (provActual?.saldo_pendiente || 0) + total }).eq('id', compra.proveedor_id)
+    }
+
+  }
+
+  // Crea un item de compra completo: compra_item, stock, costo promedio, lote y trazabilidad
+  const crearItem = async (compraId, item, traz) => {
       const prod = materiasPrimas.find(p => p.id === item.producto_id)
       const codigo_lote = await generarCodigoLote(prod)
       const cantidadNueva = parseFloat(item.cantidad)
@@ -306,30 +294,181 @@ export default function Compras() {
         }])
         if (trazError) console.log('TRAZ ERROR:', trazError)
       }
-    }
+  }
 
-    if (compra.estado === 'contado') {
-      if (compra.metodo_pago === 'efectivo') {
-        await supabase.from('egresos').insert([{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedor?.empresa}`, metodo_pago: 'efectivo', monto: total }])
-      } else if (compra.metodo_pago === 'transferencia') {
-        await supabase.from('egresos').insert([{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedor?.empresa}`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta1}`, monto: total }])
-      } else if (compra.metodo_pago === 'efectivo_transferencia') {
-        await supabase.from('egresos').insert([
-          { compra_id: compraId, concepto: `Compra ${folio} (efectivo)`, metodo_pago: 'efectivo', monto: parseFloat(compra.monto1) || 0 },
-          { compra_id: compraId, concepto: `Compra ${folio} (transferencia)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta2}`, monto: parseFloat(compra.monto2) || 0 }
-        ])
-      } else if (compra.metodo_pago === 'transferencia_transferencia') {
-        await supabase.from('egresos').insert([
-          { compra_id: compraId, concepto: `Compra ${folio} (transf. 1)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta1}`, monto: parseFloat(compra.monto1) || 0 },
-          { compra_id: compraId, concepto: `Compra ${folio} (transf. 2)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta2}`, monto: parseFloat(compra.monto2) || 0 }
-        ])
+  // Deshace un item: stock, costo promedio, lote, trazabilidad y el propio compra_item
+  const revertirItem = async (it) => {
+    const { data: p } = await supabase.from('productos').select('stock_actual, costo_promedio').eq('id', it.producto_id).single()
+    if (p) {
+      const stock = parseFloat(p.stock_actual) || 0
+      const cant = parseFloat(it.cantidad) || 0
+      const costo = parseFloat(it.costo_unitario) || 0
+      const prom = parseFloat(p.costo_promedio) || 0
+      const nuevoStock = Math.max(0, stock - cant)
+      const upd = { stock_actual: nuevoStock }
+      if (nuevoStock > 0 && prom > 0) {
+        const valor = stock * prom - cant * costo
+        if (valor > 0) upd.costo_promedio = Math.round(valor / nuevoStock)
       }
+      await supabase.from('productos').update(upd).eq('id', it.producto_id)
+    }
+    await supabase.from('lotes').delete().eq('codigo_lote', it.codigo_lote)
+    await supabase.from('trazabilidad_recepcion').delete().eq('compra_item_id', it.id)
+    await supabase.from('compra_items').delete().eq('id', it.id)
+  }
+
+  // Edición: conserva los items y lotes que no cambian. Solo toca los items modificados,
+  // eliminados o nuevos. Los items con lote ya usado quedan bloqueados (solo costo y trazabilidad).
+  const guardarEdicion = async (subtotal, descuento, total) => {
+    const orig = compraOriginal.compra
+    const bloqueados = new Set(compraOriginal.bloqueados || [])
+    const proveedor = proveedores.find(p => p.id === compra.proveedor_id)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+
+      // 1. Deshacer el pago anterior
+      await supabase.from('egresos').delete().eq('compra_id', orig.id)
+      if (orig.estado === 'credito') {
+        const { data: provOld } = await supabase.from('proveedores').select('saldo_pendiente').eq('id', orig.proveedor_id).single()
+        if (provOld) await supabase.from('proveedores').update({ saldo_pendiente: Math.max(0, (parseFloat(provOld.saldo_pendiente) || 0) - (parseFloat(orig.total) || 0)) }).eq('id', orig.proveedor_id)
+      }
+
+      // 2. Encabezado
+      const { error: errC } = await supabase.from('compras').update({
+        proveedor_id: compra.proveedor_id, proveedor_nombre: proveedor?.empresa || '',
+        factura_proveedor: compra.factura_proveedor || null,
+        fecha_compra: compra.fecha_compra || hoyISO(),
+        estado: compra.estado, metodo_pago: compra.estado === 'credito' ? null : compra.metodo_pago,
+        tipo_cuenta1: compra.tipo_cuenta1 || null, monto1: parseFloat(compra.monto1) || 0,
+        tipo_cuenta2: compra.tipo_cuenta2 || null, monto2: parseFloat(compra.monto2) || 0,
+        subtotal, descuento, total, observaciones: compra.observaciones
+      }).eq('id', orig.id)
+      if (errC) throw new Error(errC.message)
+
+      // 3. Items quitados por el usuario (solo si su lote no se ha usado)
+      const idsActuales = new Set(items.filter(i => i.id).map(i => i.id))
+      for (const itOrig of compraOriginal.items) {
+        if (!idsActuales.has(itOrig.id) && !bloqueados.has(itOrig.id)) await revertirItem(itOrig)
+      }
+
+      // 4. Items actuales: nuevos, cambiados de producto, o con cambios de cantidad/costo/trazabilidad
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i]
+        const traz = trazabilidad[i] || trazVacio()
+        const prod = materiasPrimas.find(p => p.id === item.producto_id)
+
+        if (!item.id) { await crearItem(orig.id, item, traz); continue }
+
+        const itOrig = compraOriginal.items.find(x => x.id === item.id)
+        if (!itOrig) continue
+        const bloqueado = bloqueados.has(item.id)
+
+        // Cambió el producto: se deshace el item y se crea de nuevo con lote nuevo
+        if (!bloqueado && itOrig.producto_id !== item.producto_id) {
+          await revertirItem(itOrig)
+          await crearItem(orig.id, item, traz)
+          continue
+        }
+
+        const cantVieja = parseFloat(itOrig.cantidad) || 0
+        const costoViejo = parseFloat(itOrig.costo_unitario) || 0
+        const cantNueva = bloqueado ? cantVieja : parseFloat(item.cantidad)
+        const costoNuevo = parseFloat(item.costo_unitario)
+
+        await supabase.from('compra_items').update({
+          cantidad: cantNueva, unidad: bloqueado ? itOrig.unidad : item.unidad,
+          costo_unitario: costoNuevo, subtotal: cantNueva * costoNuevo
+        }).eq('id', item.id)
+
+        // Ajuste de stock y costo promedio si cambió la cantidad o el costo
+        if (cantNueva !== cantVieja || costoNuevo !== costoViejo) {
+          const { data: p } = await supabase.from('productos').select('stock_actual, costo_promedio, ultimo_costo').eq('id', item.producto_id).single()
+          const stock = parseFloat(p?.stock_actual) || 0
+          const prom = parseFloat(p?.costo_promedio) || costoViejo
+          const nuevoStock = Math.max(0, stock - cantVieja + cantNueva)
+          let nuevoProm = prom
+          if (nuevoStock > 0) {
+            const valor = stock * prom - cantVieja * costoViejo + cantNueva * costoNuevo
+            nuevoProm = valor > 0 ? Math.round(valor / nuevoStock) : costoNuevo
+          }
+          const upd = { stock_actual: nuevoStock, costo_promedio: nuevoProm }
+          if (parseFloat(p?.ultimo_costo) === costoViejo) upd.ultimo_costo = costoNuevo
+          await supabase.from('productos').update(upd).eq('id', item.producto_id)
+        }
+
+        // Lote: vencimiento siempre; cantidades solo si el lote no se había usado
+        const loteUpd = { fecha_vencimiento: traz.fecha_vencimiento || null }
+        if (!bloqueado && cantNueva !== cantVieja) { loteUpd.cantidad_inicial = cantNueva; loteUpd.cantidad_actual = cantNueva }
+        await supabase.from('lotes').update(loteUpd).eq('codigo_lote', item.codigo_lote)
+
+        // Trazabilidad
+        if (prod?.categoria_mp !== 'empaques') {
+          const { data: existente } = await supabase.from('trazabilidad_recepcion').select('id').eq('compra_item_id', item.id).maybeSingle()
+          if (existente) {
+            await supabase.from('trazabilidad_recepcion').update(trazAFila(traz)).eq('id', existente.id)
+          } else {
+            await supabase.from('trazabilidad_recepcion').insert([{
+              compra_id: orig.id, compra_item_id: item.id, producto_id: item.producto_id,
+              nombre_producto: item.nombre_producto, ...trazAFila(traz)
+            }])
+          }
+        }
+      }
+
+      // 5. Pago nuevo
+      await registrarPago(orig.id, orig.folio, proveedor?.empresa, total)
+
+      await supabase.from('auditoria').insert([{
+        tabla: 'compras', accion: 'EDICIÓN',
+        descripcion: `${orig.folio} — ${proveedor?.empresa} — Total: $${orig.total?.toLocaleString()} → $${total.toLocaleString()}`,
+        datos_anteriores: orig, usuario_email: user?.email || 'desconocido', fecha: new Date().toISOString()
+      }])
+
+      cerrarForm(); cargar(); cargarMaterias()
+    } catch (e) {
+      alert('Error al guardar la edición: ' + e.message + '\nRevisa la compra ' + orig.folio + ' antes de reintentar.')
+    }
+    setGuardando(false)
+  }
+
+  const guardar = async () => {
+    if (!compra.proveedor_id) { alert('Selecciona un proveedor'); return }
+    if (items.length === 0) { alert('Agrega al menos un producto'); return }
+    if (items.some(i => !i.producto_id || !i.cantidad || !i.costo_unitario)) { alert('Completa todos los campos'); return }
+
+    const { subtotal, descuento, total } = calcularTotales()
+    if (!validarMontos(total)) return
+
+    setGuardando(true)
+    if (editandoId) { await guardarEdicion(subtotal, descuento, total); return }
+    const proveedor = proveedores.find(p => p.id === compra.proveedor_id)
+    const { data: { user } } = await supabase.auth.getUser()
+    let compraId, folio
+
+    if (!editandoId) {
+      try {
+        folio = await siguienteFolio()
+      } catch (e) {
+        alert(e.message); setGuardando(false); return
+      }
+      const { data, error } = await supabase.from('compras').insert([{
+        folio, proveedor_id: compra.proveedor_id, proveedor_nombre: proveedor?.empresa || '',
+        factura_proveedor: compra.factura_proveedor || null,
+        fecha_compra: compra.fecha_compra || hoyISO(),
+        estado: compra.estado, metodo_pago: compra.estado === 'credito' ? null : compra.metodo_pago,
+        tipo_cuenta1: compra.tipo_cuenta1 || null, monto1: parseFloat(compra.monto1) || 0,
+        tipo_cuenta2: compra.tipo_cuenta2 || null, monto2: parseFloat(compra.monto2) || 0,
+        subtotal, descuento, total, observaciones: compra.observaciones, usuario_email: user?.email
+      }]).select()
+      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
+      compraId = data[0].id
     }
 
-    if (compra.estado === 'credito') {
-      const { data: provActual } = await supabase.from('proveedores').select('saldo_pendiente').eq('id', compra.proveedor_id).single()
-      await supabase.from('proveedores').update({ saldo_pendiente: (provActual?.saldo_pendiente || 0) + total }).eq('id', compra.proveedor_id)
+    for (let i = 0; i < items.length; i++) {
+      await crearItem(compraId, items[i], trazabilidad[i])
     }
+
+    await registrarPago(compraId, folio, proveedor?.empresa, total)
 
     cerrarForm(); setGuardando(false); cargar(); cargarMaterias()
   }
@@ -459,16 +598,49 @@ export default function Compras() {
           <div style={{ fontSize: 20, fontWeight: 700 }}>🛒 Compras</div>
           <div style={{ fontSize: 13, color: '#5A4F47', marginTop: 4 }}>{loading ? '...' : `${compras.length} compras registradas`}</div>
         </div>
-        <button onClick={() => setMostrarForm(true)} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '9px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
-          ＋ Nueva compra
-        </button>
+        {vista === 'compras' && (
+          <button onClick={() => setMostrarForm(true)} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '9px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+            ＋ Nueva compra
+          </button>
+        )}
       </div>
 
-      {mostrarForm && (
+      {/* PESTAÑAS: Compras | Pendientes */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+        {[['compras', 'Compras'], ['pendientes', `Pendientes (${pendientes.length})`]].map(([k, l]) => {
+          const activa = vista === k
+          const alerta = k === 'pendientes' && pendientes.length > 0
+          return (
+            <button key={k} onClick={() => setVista(k)} style={{
+              padding: '8px 16px', borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              border: activa ? 'none' : '1px solid #DDD8CF',
+              background: activa ? '#B22222' : (alerta ? '#FEF3DC' : '#fff'),
+              color: activa ? '#fff' : (alerta ? '#C07D00' : '#5A4F47')
+            }}>{l}</button>
+          )
+        })}
+      </div>
+
+      {vista === 'pendientes' && (
+        <ComprasPendientes
+          pendientes={pendientes}
+          loading={loading}
+          isMobile={isMobile}
+          onRefrescar={() => { cargar(); cargarMaterias() }}
+        />
+      )}
+
+      {vista === 'compras' && mostrarForm && (
         <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, padding: 24, marginBottom: 20 }}>
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
             {editandoId ? `✏️ Editando: ${compraOriginal?.compra.folio}` : 'Nueva compra'}
           </div>
+
+          {editandoId && items.some(i => i.bloqueado) && (
+            <div style={{ background: '#FEF3DC', borderRadius: 7, padding: 10, fontSize: 12, color: '#C07D00', marginBottom: 14 }}>
+              🔒 Los productos marcados con candado ya se usaron (producción o ventas): solo puedes corregir su costo y trazabilidad. Los demás puedes cambiarlos, quitarlos o agregar nuevos.
+            </div>
+          )}
 
           {/* DATOS GENERALES */}
           <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 14 }}>
@@ -557,7 +729,7 @@ export default function Compras() {
           <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 14 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <div style={{ fontSize: 11, color: '#9A8E85', fontWeight: 600 }}>MATERIA PRIMA / INSUMOS</div>
-              <button onClick={agregarItem} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>＋ Agregar</button>
+              {<button onClick={agregarItem} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>＋ Agregar</button>}
             </div>
             {items.length === 0 && <div style={{ padding: 12, background: '#fff', borderRadius: 7, fontSize: 12, color: '#9A8E85', textAlign: 'center' }}>Haz clic en "＋ Agregar" para añadir productos</div>}
 
@@ -567,21 +739,22 @@ export default function Compras() {
               const traz = trazabilidad[index] || {}
               return (
                 <div key={index} style={{ background: '#fff', borderRadius: 8, padding: 14, marginBottom: 12, border: '1px solid #DDD8CF' }}>
+                  {item.bloqueado && <div style={{ fontSize: 11, color: '#C07D00', fontWeight: 600, marginBottom: 8 }}>🔒 Lote {item.codigo_lote} ya usado</div>}
                   <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto', gap: 10, alignItems: 'end', marginBottom: 10 }}>
                     <div>
                       <label style={lbl}>PRODUCTO</label>
-                      <select value={item.producto_id} onChange={e => actualizarItem(index, 'producto_id', e.target.value)} style={inp}>
+                      <select value={item.producto_id} disabled={!!item.bloqueado} onChange={e => actualizarItem(index, 'producto_id', e.target.value)} style={inp}>
                         <option value="">Selecciona...</option>
                         {materiasPrimas.map(p => <option key={p.id} value={p.id}>{p.codigo} — {p.nombre} (Stock: {p.stock_actual} {p.unidad})</option>)}
                       </select>
                     </div>
                     <div>
                       <label style={lbl}>CANTIDAD</label>
-                      <input type="number" value={item.cantidad} onChange={e => actualizarItem(index, 'cantidad', e.target.value)} placeholder="0" style={inp} />
+                      <input type="number" value={item.cantidad} disabled={!!item.bloqueado} onChange={e => actualizarItem(index, 'cantidad', e.target.value)} placeholder="0" style={inp} />
                     </div>
                     <div>
                       <label style={lbl}>UNIDAD</label>
-                      <select value={item.unidad} onChange={e => actualizarItem(index, 'unidad', e.target.value)} style={inp}>
+                      <select value={item.unidad} disabled={!!item.bloqueado} onChange={e => actualizarItem(index, 'unidad', e.target.value)} style={inp}>
                         <option value="kg">kg</option><option value="g">g</option><option value="lt">lt</option><option value="und">und</option><option value="lb">lb</option>
                       </select>
                     </div>
@@ -589,7 +762,9 @@ export default function Compras() {
                       <label style={lbl}>COSTO UNIT.{' '}{prod?.ultimo_costo > 0 && <span style={{ color: '#1A5FA8', fontSize: 10 }}>(Último: ${Number(prod.ultimo_costo).toLocaleString('es-CO')})</span>}</label>
                       <input type="number" value={item.costo_unitario} onChange={e => actualizarItem(index, 'costo_unitario', e.target.value)} placeholder="0" style={inp} />
                     </div>
-                    <button onClick={() => eliminarItem(index)} style={{ padding: '8px 10px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 14, marginBottom: 1 }}>✕</button>
+                    {!item.bloqueado ? (
+                      <button onClick={() => eliminarItem(index)} style={{ padding: '8px 10px', background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 14, marginBottom: 1 }}>✕</button>
+                    ) : <span />}
                   </div>
 
                   {item.subtotal > 0 && <div style={{ fontSize: 11, color: '#1A9156', fontWeight: 600, marginBottom: 10 }}>Subtotal: ${item.subtotal.toLocaleString('es-CO')}</div>}
@@ -705,7 +880,7 @@ export default function Compras() {
         </div>
       )}
 
-      {loading ? (
+      {vista === 'compras' && (loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: '#9A8E85' }}>Cargando...</div>
       ) : compras.length === 0 ? (
         <div style={{ textAlign: 'center', padding: 40, color: '#9A8E85', background: '#fff', borderRadius: 9, border: '1px solid #DDD8CF' }}>
@@ -749,7 +924,7 @@ export default function Compras() {
             </table>
           </TablaScroll>
         </div>
-      )}
+      ))}
     </div>
   )
 }

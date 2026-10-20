@@ -5,6 +5,23 @@ import DocumentoVenta from './DocumentoVenta'
 
 const CLAVE_EDICION = '1234'
 
+// ── Helpers de fecha/hora LOCAL (evitan que toISOString() salte al día siguiente) ──
+// new Date().toISOString() siempre convierte a UTC. En Colombia (UTC-5), desde
+// aprox. las 7pm en adelante, la fecha UTC ya es la del día siguiente. Estas
+// funciones "corrigen" el offset antes de convertir, para que el resultado
+// coincida con la fecha/hora que marca el reloj local.
+const fechaLocalHoy = () => {
+  const d = new Date()
+  const offset = d.getTimezoneOffset() * 60000
+  return new Date(d.getTime() - offset).toISOString().slice(0, 10)
+}
+
+const fechaHoraLocalAhora = () => {
+  const d = new Date()
+  const offset = d.getTimezoneOffset() * 60000
+  return new Date(d.getTime() - offset).toISOString().slice(0, 16)
+}
+
 export default function Ventas() {
   const [ventas, setVentas] = useState([])
   const [clientes, setClientes] = useState([])
@@ -56,7 +73,7 @@ export default function Ventas() {
     iva: false,
     observaciones: '',
     fecha_vencimiento: '',
-    fecha: new Date().toISOString().slice(0, 10)
+    fecha: fechaLocalHoy()
   })
 
   // Referencias para el manejo de "cantidad" sin bloquear el input mientras se consulta la BD
@@ -271,7 +288,7 @@ export default function Ventas() {
     setEditandoId(null)
     setVentaOriginal(null)
     setItems([])
-    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: new Date().toISOString().slice(0, 10) })
+    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: fechaLocalHoy() })
     setMostrarForm(true)
   }
 
@@ -308,7 +325,7 @@ export default function Ventas() {
       iva: v.iva > 0,
       observaciones: v.observaciones || '',
       fecha_vencimiento: v.fecha_vencimiento || '',
-      fecha: v.creado_en ? new Date(v.creado_en).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)
+      fecha: v.creado_en ? new Date(v.creado_en).toISOString().slice(0, 10) : fechaLocalHoy()
     })
 
     const itemsConLotes = await Promise.all((itemsVenta || []).map(async (i) => {
@@ -492,7 +509,7 @@ export default function Ventas() {
     setItems([])
     setEditandoId(null)
     setVentaOriginal(null)
-    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: new Date().toISOString().slice(0, 10) })
+    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: fechaLocalHoy() })
     setGuardando(false)
     cargar()
     cargarProductos()
@@ -610,7 +627,7 @@ export default function Ventas() {
       })
     } else {
       setTrazForm({
-        fecha_hora_salida: new Date().toISOString().slice(0, 16),
+        fecha_hora_salida: fechaHoraLocalAhora(),
         temperatura_producto: '', temperatura_vehiculo: '',
         transportador: '', placa_vehiculo: '',
         destino_direccion: cliente?.direccion || '', destino_ciudad: cliente?.ciudad || '',

@@ -1,10 +1,5 @@
 // src/reportes/ReporteProduccion.jsx
-//
-// Pantalla real (nivel 2) del área Producción dentro de Reportes.
-// Muestra TODOS los productos con producción registrada este mes:
-// gráfico horizontal (crece con la cantidad de productos, no trunca)
-// + tabla completa con buscador.
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../supabase';
 import BarChartWidget from './graficos/BarChartWidget';
 import DataTable from './graficos/DataTable';
@@ -15,6 +10,7 @@ export default function ReporteProduccion() {
   const [filas, setFilas] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
+  const [seleccion, setSeleccion] = useState(null);
 
   useEffect(() => {
     let activo = true;
@@ -30,39 +26,84 @@ export default function ReporteProduccion() {
     return () => { activo = false; };
   }, []);
 
-  if (cargando) return <p className="reportes-proximamente">Cargando producción...</p>;
-  if (error) return <p className="reportes-proximamente">No se pudo cargar: {error}</p>;
-  if (filas.length === 0) return <p className="reportes-proximamente">No hay producción registrada este mes.</p>;
+  // Los hooks van ANTES de los return condicionales
+  const ordenadas = useMemo(
+    () =>
+      filas
+        .map((f) => ({ ...f, cantidad_producida: Number(f.cantidad_producida) }))
+        .sort((a, b) => b.cantidad_producida - a.cantidad_producida),
+    [filas]
+  );
 
-  // Datos para el gráfico: todos los productos, sin recortar a un top N
-  const datosGrafico = filas.map((f) => ({
+  // Total por unidad: no se mezclan kg con unidades o litros
+  const totalesPorUnidad = useMemo(() => {
+    const m = new Map();
+    ordenadas.forEach((f) => m.set(f.unidad, (m.get(f.unidad) ?? 0) + f.cantidad_producida));
+    return [...m];
+  }, [ordenadas]);
+
+  if (cargando) {
+    return (
+      <div>
+        <div className="kpi-card__skeleton" style={{ height: 64, marginBottom: 16 }} />
+        <div className="kpi-card__skeleton" style={{ height: 260 }} />
+      </div>
+    );
+  }
+  if (error) return <p className="reportes-proximamente">No se pudo cargar: {error}</p>;
+  if (ordenadas.length === 0) {
+    return <p className="reportes-proximamente">No hay producción registrada este mes.</p>;
+  }
+
+  const lider = ordenadas[0];
+
+  const datosGrafico = ordenadas.map((f) => ({
     producto: f.producto,
     cantidad: f.cantidad_producida,
   }));
 
-  // Datos para la tabla
-  const filasTabla = filas.map((f) => ({
-    producto: f.producto,
-    unidad: f.unidad,
-    cantidad: formatearNumero(f.cantidad_producida),
-  }));
-
   return (
     <div>
+      <div className="kpi-strip">
+        <div className="kpi-strip__item">
+          <p className="kpi-strip__valor">{ordenadas.length}</p>
+          <p className="kpi-strip__label">Productos con producción</p>
+        </div>
+        <div className="kpi-strip__item kpi-strip__item--destacado">
+          <p className="kpi-strip__valor">{lider.producto}</p>
+          <p className="kpi-strip__label">
+            Líder · {formatearNumero(lider.cantidad_producida)} {lider.unidad}
+          </p>
+        </div>
+        {totalesPorUnidad.map(([unidad, total]) => (
+          <div className="kpi-strip__item" key={unidad}>
+            <p className="kpi-strip__valor">{formatearNumero(total)}</p>
+            <p className="kpi-strip__label">Total · {unidad}</p>
+          </div>
+        ))}
+      </div>
+
       <BarChartWidget
         titulo="Producción por producto — mes en curso"
         data={datosGrafico}
         xKey="producto"
         series={[{ key: 'cantidad', label: 'Cantidad producida', color: '#B22222' }]}
         orientacion="horizontal"
+        formatoValor={formatearNumero}
+        seleccion={seleccion}
+        onSelect={setSeleccion}
       />
+
       <DataTable
         columnas={[
           { key: 'producto', label: 'Producto' },
           { key: 'unidad', label: 'Unidad' },
-          { key: 'cantidad', label: 'Cantidad producida' },
+          { key: 'cantidad_producida', label: 'Cantidad producida', formato: 'numero' },
         ]}
-        filas={filasTabla}
+        filas={ordenadas}
+        claveFila="producto"
+        seleccion={seleccion}
+        onSelectFila={setSeleccion}
         buscarPlaceholder="Buscar producto..."
       />
     </div>

@@ -162,20 +162,40 @@ export default function DocumentoVenta({ venta, onCerrar }) {
     window.open(url, '_blank')
   }
 
+  // Compartir imagen por WhatsApp: primero intenta el selector nativo del
+  // dispositivo (navigator.share), que si está disponible deja la imagen
+  // ya adjunta en WhatsApp con un solo toque. Si el navegador no lo
+  // soporta (p. ej. Chrome de escritorio), cae al método de siempre:
+  // descargar el archivo y abrir WhatsApp para adjuntarlo manualmente.
   const enviarWAJPG = async () => {
     setShowWAMenu(false)
     try {
       const canvas = await capturarDocumento()
-      canvas.toBlob(blob => {
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url; a.download = `${venta.folio || 'documento'}.jpg`
-        a.click(); URL.revokeObjectURL(url)
-        setTimeout(abrirWhatsAppParaAdjuntar, 600)
-      }, 'image/jpeg', 0.95)
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.95))
+      if (!blob) throw new Error('No se pudo generar la imagen')
+      const archivo = new File([blob], `${venta.folio || 'documento'}.jpg`, { type: 'image/jpeg' })
+      const tituloCompartir = `${venta.tipo === 'remision' ? 'Remisión' : 'Factura'} ${venta.folio}`
+
+      if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
+        try {
+          await navigator.share({ files: [archivo], title: tituloCompartir, text: `${tituloCompartir} — ${venta.cliente_nombre}` })
+          return // se compartió directo, listo
+        } catch (err) {
+          if (err?.name === 'AbortError') return // el usuario canceló, no insistir
+          // si falla por otra razón, seguimos al respaldo de abajo
+        }
+      }
+
+      // Respaldo: descargar y abrir WhatsApp para adjuntar manualmente
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = `${venta.folio || 'documento'}.jpg`
+      a.click(); URL.revokeObjectURL(url)
+      setTimeout(abrirWhatsAppParaAdjuntar, 600)
     } catch (e) { alert('Error al generar imagen') }
   }
 
+  // Mismo doble intento que enviarWAJPG, pero con el PDF.
   const enviarWAPDF = async () => {
     setShowWAMenu(false)
     try {
@@ -186,7 +206,23 @@ export default function DocumentoVenta({ venta, onCerrar }) {
       const { jsPDF } = window.jspdf
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'px', format: [canvas.width / 2, canvas.height / 2] })
       pdf.addImage(imgData, 'JPEG', 0, 0, canvas.width / 2, canvas.height / 2)
-      pdf.save(`${venta.folio || 'documento'}.pdf`)
+      const nombreArchivo = `${venta.folio || 'documento'}.pdf`
+      const blobPdf = pdf.output('blob')
+      const archivo = new File([blobPdf], nombreArchivo, { type: 'application/pdf' })
+      const tituloCompartir = `${venta.tipo === 'remision' ? 'Remisión' : 'Factura'} ${venta.folio}`
+
+      if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
+        try {
+          await navigator.share({ files: [archivo], title: tituloCompartir, text: `${tituloCompartir} — ${venta.cliente_nombre}` })
+          return // se compartió directo, listo
+        } catch (err) {
+          if (err?.name === 'AbortError') return // el usuario canceló, no insistir
+          // si falla por otra razón, seguimos al respaldo de abajo
+        }
+      }
+
+      // Respaldo: descargar y abrir WhatsApp para adjuntar manualmente
+      pdf.save(nombreArchivo)
       setTimeout(abrirWhatsAppParaAdjuntar, 600)
     } catch (e) { alert('Error al generar PDF') }
   }

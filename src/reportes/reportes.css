@@ -449,3 +449,47 @@
   background: #F0ECE5;
   color: #6b6b6b;
 }
+/* ===================== DataTable: números y selección ===================== */
+
+.data-table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table thead th:hover {
+  color: var(--reportes-rojo);
+}
+
+.data-table tbody tr {
+  transition: background-color 0.12s ease;
+}
+
+.data-table tbody tr:hover {
+  background: #faf7f2;
+}
+
+.data-table__fila--clicable {
+  cursor: pointer;
+}
+
+.data-table__fila--seleccionada,
+.data-table__fila--seleccionada:hover {
+  background: #fdf3f3;
+  box-shadow: inset 3px 0 0 var(--reportes-rojo);
+}
+
+.data-table__fila--seleccionada td {
+  font-weight: 600;
+}
+
+.data-table__buscar:focus {
+  outline: none;
+  border-color: var(--reportes-rojo);
+  box-shadow: 0 0 0 3px rgba(178, 34, 34, 0.12);
+}
+
+.kpi-strip__valor {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

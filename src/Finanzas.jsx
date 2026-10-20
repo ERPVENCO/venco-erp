@@ -747,7 +747,7 @@ function Egresos({ desde, hasta }) {
             </thead>
             <tbody>
               {filtrados.map((e, idx) => {
-                const badge = badgeTipo(e.tipo_registro)
+                const badge = e.nomina_pago_id ? { bg: '#E8F7EF', color: '#1A9156', label: 'Nómina' } : badgeTipo(e.tipo_registro)
                 return (
                   <tr key={e.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
                     <td style={{ padding: '10px 16px', fontSize: 12, color: '#9A8E85' }}>{idx + 1}</td>
@@ -761,7 +761,7 @@ function Egresos({ desde, hasta }) {
                     <td style={{ padding: '10px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222' }}>{e.compra?.folio || e.factura_proveedor || e.factura_soporte || '—'}</td>
                     <td style={{ padding: '10px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#B22222' }}>${(e.monto || 0).toLocaleString('es-CO')}</td>
                     <td style={{ padding: '8px 16px' }}>
-                      {!e.compra_id && (
+                      {!e.compra_id && !e.nomina_pago_id && (
                         <button onClick={() => setEgresoAEliminar(e)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>🗑️</button>
                       )}
                     </td>
@@ -773,7 +773,7 @@ function Egresos({ desde, hasta }) {
         </div>
       )}
       <div style={{ fontSize: 11, color: '#9A8E85', marginTop: 8 }}>
-        Nota: los egresos con etiqueta "Compra" vienen automáticos de Compras y solo se pueden eliminar revirtiendo la compra allá, para no descuadrar el inventario. Los "Abono CxP" vienen del módulo Cuentas por Pagar.
+        Nota: los egresos con etiqueta "Compra" vienen automáticos de Compras y solo se pueden eliminar revirtiendo la compra allá, para no descuadrar el inventario. Los "Abono CxP" vienen del módulo Cuentas por Pagar. Los de "Nómina" vienen de Empleados → Nómina y se eliminan desde allí.
       </div>
     </div>
   )
@@ -786,6 +786,7 @@ function Balance({ desde, hasta }) {
   const [totalIngresos, setTotalIngresos] = useState(0)
   const [totalEgresos, setTotalEgresos] = useState(0)
   const [porCuenta, setPorCuenta] = useState({})
+  const [reservadoPorCuenta, setReservadoPorCuenta] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -802,6 +803,20 @@ function Balance({ desde, hasta }) {
     const { data: egresos, error: errEgr } = await supabase
       .from('egresos').select('monto, tipo_cuenta, monto_efectivo, monto_transferencia_1, tipo_cuenta_1, monto_transferencia_2, tipo_cuenta_2')
       .gte('fecha', desde).lte('fecha', hasta + 'T23:59:59')
+
+    // Dinero reservado para provisiones laborales (prima, cesantías, intereses, vacaciones), por cuenta.
+    // Es el acumulado apartado desde Empleados → Nómina → Provisiones; no es un gasto ni depende del rango de fechas.
+    const { data: reservas } = await supabase
+      .from('nomina_provisiones')
+      .select('valor, nomina_apartados(cuenta)')
+      .eq('estado', 'apartada')
+    const reservado = {}
+    for (const r of reservas || []) {
+      const k = r.nomina_apartados?.cuenta
+      if (!k) continue
+      reservado[k] = (reservado[k] || 0) + (Number(r.valor) || 0)
+    }
+    setReservadoPorCuenta(reservado)
 
     if (errIng || errEgr) {
       setError((errIng || errEgr).message)
@@ -880,7 +895,7 @@ function Balance({ desde, hasta }) {
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr style={{ background: '#F4F1ED' }}>
-              {['Cuenta', 'Ingresos', 'Egresos', 'Balance'].map(h => (
+              {['Cuenta', 'Ingresos', 'Egresos', 'Balance', 'Reservado (provisiones)', 'Disponible'].map(h => (
                 <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
               ))}
             </tr>
@@ -889,18 +904,24 @@ function Balance({ desde, hasta }) {
             {Object.entries(porCuenta).map(([key, v]) => {
               const nombre = key === 'efectivo' ? 'Efectivo' : (CUENTAS[key] || key)
               const bal = v.ingresos - v.egresos
-              if (v.ingresos === 0 && v.egresos === 0) return null
+              const reservado = reservadoPorCuenta[key] || 0
+              if (v.ingresos === 0 && v.egresos === 0 && reservado === 0) return null
               return (
                 <tr key={key} style={{ borderBottom: '1px solid #DDD8CF' }}>
                   <td style={{ padding: '10px 16px', fontSize: 13, fontWeight: 600 }}>{nombre}</td>
                   <td style={{ padding: '10px 16px', fontSize: 13, color: '#1A9156', fontFamily: 'monospace' }}>${v.ingresos.toLocaleString('es-CO')}</td>
                   <td style={{ padding: '10px 16px', fontSize: 13, color: '#B22222', fontFamily: 'monospace' }}>${v.egresos.toLocaleString('es-CO')}</td>
                   <td style={{ padding: '10px 16px', fontSize: 13, fontWeight: 700, fontFamily: 'monospace', color: bal >= 0 ? '#1A5FA8' : '#B22222' }}>${bal.toLocaleString('es-CO')}</td>
+                  <td style={{ padding: '10px 16px', fontSize: 13, fontFamily: 'monospace', color: '#C07D00' }}>${reservado.toLocaleString('es-CO')}</td>
+                  <td style={{ padding: '10px 16px', fontSize: 13, fontWeight: 700, fontFamily: 'monospace', color: bal - reservado >= 0 ? '#1A9156' : '#B22222' }}>${(bal - reservado).toLocaleString('es-CO')}</td>
                 </tr>
               )
             })}
           </tbody>
         </table>
+      </div>
+      <div style={{ fontSize: 11, color: '#9A8E85', marginTop: 8 }}>
+        "Reservado" es dinero apartado para provisiones laborales desde Empleados → Nómina → Provisiones (acumulado, no depende de las fechas). No es un gasto: sigue en la cuenta, pero no está disponible.
       </div>
     </div>
   )

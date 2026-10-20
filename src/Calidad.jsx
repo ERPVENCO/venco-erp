@@ -1,10 +1,22 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
+import RegistrarRecepcion from './RegistrarRecepcion'
+import { hayAperturaRecepcion, consumirAperturaRecepcion } from './vozBus'
 
 const EMPRESA = { nombre: 'ALIMENTOS VENCO M&Y', logo: '/logo.jpg' }
 
 export default function Calidad() {
   const [submodulo, setSubmodulo] = useState('menu')
+
+  // VOZ: "Hey Veya, nueva recepción" abre el formato de recepción
+  // (el formato, a su vez, abre el formulario)
+  useEffect(() => {
+    const abrir = () => { if (hayAperturaRecepcion()) setSubmodulo('recepcion_mp') }
+    abrir()
+    window.addEventListener('voz:abrir-recepcion', abrir)
+    return () => window.removeEventListener('voz:abrir-recepcion', abrir)
+  }, [])
+
   return (
     <div>
       <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 20 }}>🔬 Calidad</div>
@@ -56,8 +68,17 @@ function FormatoRecepcion({ onVolver }) {
   const [registros, setRegistros] = useState([])
   const [itemsMap, setItemsMap] = useState({})
   const [loading, setLoading] = useState(true)
+  const [registrando, setRegistrando] = useState(false)
 
   useEffect(() => { cargar() }, [])
+
+  // VOZ: si se pidió "nueva recepción", abre directamente el formulario de registro
+  useEffect(() => {
+    const abrir = () => { if (consumirAperturaRecepcion()) setRegistrando(true) }
+    abrir()
+    window.addEventListener('voz:abrir-recepcion', abrir)
+    return () => window.removeEventListener('voz:abrir-recepcion', abrir)
+  }, [])
 
   const cargar = async () => {
     setLoading(true)
@@ -82,6 +103,11 @@ function FormatoRecepcion({ onVolver }) {
 
     setRegistros(traz || [])
     setLoading(false)
+  }
+
+  // Vista del formulario de recepción (operario)
+  if (registrando) {
+    return <RegistrarRecepcion onVolver={() => setRegistrando(false)} onGuardado={cargar} />
   }
 
   const imprimir = () => {
@@ -137,8 +163,9 @@ function FormatoRecepcion({ onVolver }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 10, marginBottom: 18, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 18, alignItems: 'center', flexWrap: 'wrap' }}>
         <button onClick={onVolver} style={{ background: '#F4F1ED', border: '1px solid #DDD8CF', borderRadius: 7, padding: '7px 14px', fontSize: 12, cursor: 'pointer' }}>← Volver</button>
+        <button onClick={() => setRegistrando(true)} style={{ background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, padding: '7px 16px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>➕ Registrar recepción</button>
         <button onClick={imprimir} style={{ background: '#1A5FA8', color: '#fff', border: 'none', borderRadius: 7, padding: '7px 16px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>🖨️ Imprimir formato</button>
         <button onClick={cargar} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 7, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>🔄 Actualizar</button>
         {loading && <span style={{ fontSize: 12, color: '#9A8E85' }}>Cargando...</span>}
@@ -171,11 +198,12 @@ function FormatoRecepcion({ onVolver }) {
             <tr>
               <th rowSpan={2} style={{ ...thS, width: '4.5%' }}>FECHA</th>
               <th rowSpan={2} style={{ ...thS, width: '3.5%' }}>HORA</th>
-              <th rowSpan={2} style={{ ...thS, width: '7%' }}>MATERIA PRIMA</th>
+              <th rowSpan={2} style={{ ...thS, width: '4.5%' }}>N° FOLIO</th>
+              <th rowSpan={2} style={{ ...thS, width: '6.5%' }}>MATERIA PRIMA</th>
               <th rowSpan={2} style={{ ...thS, width: '5.5%' }}>Nº LOTE</th>
-              <th rowSpan={2} style={{ ...thS, width: '5.5%' }}>LOTE PROVEEDOR</th>
-              <th rowSpan={2} style={{ ...thS, width: '5.5%' }}>N° FACTURA</th>
-              <th rowSpan={2} style={{ ...thS, width: '7%' }}>PROVEEDOR</th>
+              <th rowSpan={2} style={{ ...thS, width: '5%' }}>LOTE PROVEEDOR</th>
+              <th rowSpan={2} style={{ ...thS, width: '5.5%' }}>N° FACTURA PROV.</th>
+              <th rowSpan={2} style={{ ...thS, width: '6.5%' }}>PROVEEDOR</th>
               <th colSpan={4} style={{ ...thS }}>INSPECCIÓN TRANSPORTE</th>
               <th colSpan={3} style={{ ...thS }}>CARACTERÍSTICAS DE CALIDAD</th>
               <th rowSpan={2} style={{ ...thS, width: '5%' }}>FECHA VENC.</th>
@@ -201,6 +229,7 @@ function FormatoRecepcion({ onVolver }) {
                 <tr key={r.id} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
                   <td style={tdS}>{fmt(c.creado_en)}</td>
                   <td style={tdS}>{r.hora_recepcion ? r.hora_recepcion.slice(0, 5) : fmtHora(c.creado_en)}</td>
+                  <td style={{ ...tdS, fontFamily: 'monospace', fontWeight: 600, color: '#B22222' }}>{c.folio || '—'}</td>
                   <td style={{ ...tdS, textAlign: 'left', fontWeight: 500 }}>{r.nombre_producto}</td>
                   <td style={{ ...tdS, fontSize: 7, color: '#1A5FA8', fontWeight: 600 }}>{it.codigo_lote || '—'}</td>
                   <td style={tdS}>{r.lote_proveedor || c.lote_proveedor || '—'}</td>
@@ -221,7 +250,7 @@ function FormatoRecepcion({ onVolver }) {
               )
             })}
             {Array.from({ length: filasVacias }).map((_, i) => (
-              <tr key={`e-${i}`}>{Array.from({ length: 18 }).map((_, j) => <td key={j} style={tdV}></td>)}</tr>
+              <tr key={`e-${i}`}>{Array.from({ length: 19 }).map((_, j) => <td key={j} style={tdV}></td>)}</tr>
             ))}
           </tbody>
         </table>
