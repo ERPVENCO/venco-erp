@@ -5,6 +5,12 @@ import { supabase } from "./supabase";
 // Ahumados M&Y — Cuentas por Cobrar
 // Lee de la vista `vista_cuentas_por_cobrar` (ventas a crédito con saldo en vivo)
 // Los abonos de clientes se registran como filas en `ingresos` con venta_id.
+//
+// NUEVO:
+//  - Botón "＋ Saldo anterior": registra deudas de clientes que ya existían antes del sistema.
+//    Crea una venta a crédito sin productos (folio ANT-0001...). No mueve inventario ni ingresos.
+//  - Los abonos ahora piden la cuenta donde entró la plata (se guarda en ingresos.tipo_cuenta).
+//    REQUIERE haber corrido paso1b_ingresos_manuales.sql (agrega esa columna).
 // ------------------------------------------------------------------
 
 const COLOR_ROJO = "#B22222";
@@ -15,6 +21,9 @@ const METODOS_PAGO = [
   { value: "transferencia", label: "Transferencia" },
   { value: "tarjeta", label: "Tarjeta" },
 ];
+// Mismas cuentas que Finanzas.jsx
+const CUENTAS = { "1": "Bancolombia Yohe", "2": "Bancolombia Manu", "3": "Nequi Yohe" };
+const nombreCuenta = (k) => (k === "efectivo" ? "Efectivo" : CUENTAS[k] || k);
 
 const hoyBogota = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Bogota" });
 
@@ -57,6 +66,21 @@ const colorEstado = {
   Pagada: "#1e7e34",
 };
 
+const esSaldoAnterior = (folio) => String(folio || "").startsWith("ANT-");
+
+// NUEVO: registra en la tabla auditoria, igual que Ventas y Compras. Si falla, no interrumpe la operación.
+const auditar = async (accion, tabla, descripcion, datosAnteriores = null) => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    await supabase.from("auditoria").insert([{
+      tabla, accion, descripcion, datos_anteriores: datosAnteriores,
+      usuario_email: user?.email || "desconocido", fecha: new Date().toISOString(),
+    }]);
+  } catch (e) {
+    console.error("Auditoría:", e);
+  }
+};
+
 export default function CuentasPorCobrar({ onVolver }) {
   const [cuentas, setCuentas] = useState([]);
   const [abonos, setAbonos] = useState({}); // { venta_id: [ingresos...] }
@@ -68,7 +92,7 @@ export default function CuentasPorCobrar({ onVolver }) {
   const [busquedaFolio, setBusquedaFolio] = useState("");
 
   const [modalAbono, setModalAbono] = useState(null);
-  const [formAbono, setFormAbono] = useState({ monto: "", metodo_pago: "efectivo", fecha: hoyBogota(), concepto: "" });
+  const [formAbono, setFormAbono] = useState({ monto: "", metodo_pago: "efectivo", cuenta: "", fecha: hoyBogota(), concepto: "" });
 
   const [modalHistorial, setModalHistorial] = useState(null);
 
@@ -76,8 +100,16 @@ export default function CuentasPorCobrar({ onVolver }) {
   const [passwordInput, setPasswordInput] = useState("");
   const [errorPassword, setErrorPassword] = useState("");
 
+  // NUEVO: saldo anterior
+  const [clientesLista, setClientesLista] = useState([]);
+  const [modalSaldo, setModalSaldo] = useState(false);
+  const [guardandoSaldo, setGuardandoSaldo] = useState(false);
+  const saldoVacio = { cliente_id: "", referencia: "", monto: "", fecha: hoyBogota(), vencimiento: "" };
+  const [formSaldo, setFormSaldo] = useState(saldoVacio);
+
   useEffect(() => {
     cargarCuentas();
+    cargarClientesLista();
   }, []);
 
   async function cargarCuentas() {
@@ -94,6 +126,11 @@ export default function CuentasPorCobrar({ onVolver }) {
       setCuentas(data || []);
     }
     setCargando(false);
+  }
+
+  async function cargarClientesLista() {
+    const { data } = await supabase.from("clientes").select("id, empresa").eq("activo", true).order("empresa");
+    setClientesLista(data || []);
   }
 
   async function cargarHistorial(ventaId) {
@@ -142,6 +179,7 @@ export default function CuentasPorCobrar({ onVolver }) {
     setFormAbono({
       monto: "",
       metodo_pago: "efectivo",
+      cuenta: "",
       fecha: ahoraBogotaDatetimeLocal(),
       concepto: `Abono factura ${cuenta.folio || cuenta.venta_id.slice(0, 8)}`,
     });
@@ -154,16 +192,23 @@ export default function CuentasPorCobrar({ onVolver }) {
       setError("Ingresa un monto válido.");
       return;
     }
+    // NUEVO: si no es efectivo, hay que decir a qué cuenta entró la plata
+    if (formAbono.metodo_pago !== "efectivo" && !formAbono.cuenta) {
+      setError("Elige a qué cuenta entró el pago.");
+      return;
+    }
     if (monto > Number(modalAbono.saldo)) {
       const continuar = window.confirm(
         `El abono (${formatoCOP(monto)}) es mayor al saldo pendiente (${formatoCOP(modalAbono.saldo)}). ¿Continuar de todas formas?`
       );
       if (!continuar) return;
     }
+    setError("");
     const { error: errInsert } = await supabase.from("ingresos").insert({
       venta_id: modalAbono.venta_id,
       concepto: formAbono.concepto,
       metodo_pago: formAbono.metodo_pago,
+      tipo_cuenta: formAbono.metodo_pago === "efectivo" ? "efectivo" : formAbono.cuenta,
       monto,
       fecha: formAbono.fecha,
     });
@@ -173,6 +218,74 @@ export default function CuentasPorCobrar({ onVolver }) {
     }
     setModalAbono(null);
     cargarCuentas();
+  }
+
+  // NUEVO: registrar una deuda de cliente anterior al sistema
+  async function guardarSaldoAnterior(e) {
+    e.preventDefault();
+    const monto = Number(formSaldo.monto);
+    if (!formSaldo.cliente_id) {
+      setError("Elige el cliente.");
+      return;
+    }
+    if (!monto || monto <= 0) {
+      setError("Ingresa un valor pendiente válido.");
+      return;
+    }
+    setError("");
+    setGuardandoSaldo(true);
+    try {
+      const cliente = clientesLista.find((c) => c.id === formSaldo.cliente_id);
+
+      // Siguiente folio ANT-0001, ANT-0002... (no interfiere con FAC- ni REM-)
+      const { data: ultimo } = await supabase
+        .from("ventas")
+        .select("folio")
+        .like("folio", "ANT-%")
+        .order("folio", { ascending: false })
+        .limit(1);
+      const numero = ultimo && ultimo.length ? (parseInt(ultimo[0].folio.replace("ANT-", ""), 10) || 0) + 1 : 1;
+      const folio = `ANT-${String(numero).padStart(4, "0")}`;
+
+      const { data: { user } } = await supabase.auth.getUser();
+
+      const { error: errVenta } = await supabase.from("ventas").insert({
+        folio,
+        tipo: "venta",
+        estado: "credito",
+        cliente_id: formSaldo.cliente_id,
+        cliente_nombre: cliente?.empresa || "",
+        metodo_pago: null,
+        subtotal: monto,
+        descuento: 0,
+        iva: 0,
+        total: monto,
+        observaciones: `Saldo anterior${formSaldo.referencia ? " — " + formSaldo.referencia : ""}`,
+        fecha_vencimiento: formSaldo.vencimiento || null,
+        usuario_email: user?.email || null,
+        creado_en: `${formSaldo.fecha}T12:00:00`,
+      });
+      if (errVenta) throw new Error(errVenta.message);
+
+      // Igual que hace Ventas al crear una venta a crédito: suma al saldo del cliente
+      const { data: clienteActual } = await supabase.from("clientes").select("saldo_pendiente").eq("id", formSaldo.cliente_id).single();
+      const { error: errCliente } = await supabase
+        .from("clientes")
+        .update({ saldo_pendiente: (Number(clienteActual?.saldo_pendiente) || 0) + monto })
+        .eq("id", formSaldo.cliente_id);
+      if (errCliente) {
+        setError(`La deuda ${folio} se guardó, pero no se pudo actualizar el saldo del cliente: ${errCliente.message}`);
+      }
+
+      await auditar("SALDO ANTERIOR", "ventas", `${folio} — ${cliente?.empresa} — ${formatoCOP(monto)}${formSaldo.referencia ? " — " + formSaldo.referencia : ""}`);
+
+      setModalSaldo(false);
+      setFormSaldo(saldoVacio);
+      cargarCuentas();
+    } catch (err) {
+      setError(err.message);
+    }
+    setGuardandoSaldo(false);
   }
 
   function pedirEliminarAbono(ingreso) {
@@ -195,6 +308,7 @@ export default function CuentasPorCobrar({ onVolver }) {
     if (errDelete) {
       setError(errDelete.message);
     } else {
+      await auditar("ELIMINACIÓN", "ingresos", `Abono ${formatoCOP(ingreso.monto)} — ${ingreso.concepto || ""}`, ingreso);
       cargarCuentas();
       if (ingreso.venta_id) cargarHistorial(ingreso.venta_id);
     }
@@ -212,8 +326,18 @@ export default function CuentasPorCobrar({ onVolver }) {
         </button>
       )}
 
-      <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>📥 Cuentas por Cobrar</div>
-      <p style={{ color: "#9A8E85", fontSize: 12, margin: "0 0 18px" }}>Ventas a crédito pendientes de cobro a clientes</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>📥 Cuentas por Cobrar</div>
+          <p style={{ color: "#9A8E85", fontSize: 12, margin: 0 }}>Ventas a crédito pendientes de cobro a clientes</p>
+        </div>
+        <button
+          onClick={() => { setFormSaldo({ ...saldoVacio, fecha: hoyBogota() }); setModalSaldo(true); }}
+          style={{ background: "#1A5FA8", color: "#fff", border: "none", borderRadius: 7, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+        >
+          ＋ Saldo anterior
+        </button>
+      </div>
 
       {error && (
         <div style={{ background: "#fdecea", color: COLOR_ROJO, padding: "10px 14px", borderRadius: 8, marginBottom: 16, fontSize: 13 }}>
@@ -285,7 +409,14 @@ export default function CuentasPorCobrar({ onVolver }) {
               {cuentasFiltradas.map((c) => (
                 <tr key={c.venta_id} style={{ borderTop: "1px solid #eee" }}>
                   <td style={tdStyle}>{c.cliente_nombre}</td>
-                  <td style={tdStyle}>{c.folio}</td>
+                  <td style={tdStyle}>
+                    {c.folio}
+                    {esSaldoAnterior(c.folio) && (
+                      <span style={{ marginLeft: 6, background: "#E8F0FB", color: "#1A5FA8", padding: "1px 6px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
+                        Anterior
+                      </span>
+                    )}
+                  </td>
                   <td style={tdStyle}>
                     {c.fecha_vencimiento || "—"}
                     {c.vencida && (
@@ -325,6 +456,84 @@ export default function CuentasPorCobrar({ onVolver }) {
         </div>
       )}
 
+      {/* NUEVO — Modal: registrar saldo anterior */}
+      {modalSaldo && (
+        <ModalFondo onClose={() => setModalSaldo(false)}>
+          <form onSubmit={guardarSaldoAnterior} style={modalStyle}>
+            <h2 style={{ color: COLOR_ROJO, marginTop: 0 }}>Registrar saldo anterior</h2>
+            <p style={{ color: "#555", fontSize: 13, marginTop: 0 }}>
+              Para lo que un cliente ya te debía antes de usar el sistema. Solo crea la cuenta por cobrar para que puedas abonarla: no mueve inventario ni ingresos.
+            </p>
+
+            <CampoForm label="Cliente">
+              <select
+                required
+                value={formSaldo.cliente_id}
+                onChange={(e) => setFormSaldo((f) => ({ ...f, cliente_id: e.target.value }))}
+                style={{ ...inputStyle, width: "100%" }}
+              >
+                <option value="">Selecciona un cliente...</option>
+                {clientesLista.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.empresa}
+                  </option>
+                ))}
+              </select>
+            </CampoForm>
+
+            <CampoForm label="Referencia (factura o nota anterior, opcional)">
+              <input
+                type="text"
+                value={formSaldo.referencia}
+                onChange={(e) => setFormSaldo((f) => ({ ...f, referencia: e.target.value }))}
+                placeholder="Ej. Factura vieja 1234"
+                style={{ ...inputStyle, width: "100%" }}
+              />
+            </CampoForm>
+
+            <CampoForm label="Valor pendiente hoy">
+              <input
+                type="number"
+                required
+                min="1"
+                step="1"
+                value={formSaldo.monto}
+                onChange={(e) => setFormSaldo((f) => ({ ...f, monto: e.target.value }))}
+                style={{ ...inputStyle, width: "100%" }}
+              />
+            </CampoForm>
+
+            <CampoForm label="Fecha de la deuda">
+              <input
+                type="date"
+                required
+                value={formSaldo.fecha}
+                onChange={(e) => setFormSaldo((f) => ({ ...f, fecha: e.target.value }))}
+                style={{ ...inputStyle, width: "100%" }}
+              />
+            </CampoForm>
+
+            <CampoForm label="Fecha de vencimiento (opcional)">
+              <input
+                type="date"
+                value={formSaldo.vencimiento}
+                onChange={(e) => setFormSaldo((f) => ({ ...f, vencimiento: e.target.value }))}
+                style={{ ...inputStyle, width: "100%" }}
+              />
+            </CampoForm>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+              <button type="button" style={btnSecundario} onClick={() => setModalSaldo(false)}>
+                Cancelar
+              </button>
+              <button type="submit" style={btnRojo} disabled={guardandoSaldo}>
+                {guardandoSaldo ? "Guardando..." : "Guardar saldo anterior"}
+              </button>
+            </div>
+          </form>
+        </ModalFondo>
+      )}
+
       {/* Modal: registrar abono */}
       {modalAbono && (
         <ModalFondo onClose={() => setModalAbono(null)}>
@@ -362,7 +571,7 @@ export default function CuentasPorCobrar({ onVolver }) {
             <CampoForm label="Método de pago">
               <select
                 value={formAbono.metodo_pago}
-                onChange={(e) => setFormAbono((f) => ({ ...f, metodo_pago: e.target.value }))}
+                onChange={(e) => setFormAbono((f) => ({ ...f, metodo_pago: e.target.value, cuenta: "" }))}
                 style={inputStyle}
               >
                 {METODOS_PAGO.map((m) => (
@@ -372,6 +581,23 @@ export default function CuentasPorCobrar({ onVolver }) {
                 ))}
               </select>
             </CampoForm>
+
+            {formAbono.metodo_pago !== "efectivo" && (
+              <CampoForm label="Entró a la cuenta">
+                <select
+                  value={formAbono.cuenta}
+                  onChange={(e) => setFormAbono((f) => ({ ...f, cuenta: e.target.value }))}
+                  style={inputStyle}
+                >
+                  <option value="">Selecciona...</option>
+                  {Object.entries(CUENTAS).map(([k, v]) => (
+                    <option key={k} value={k}>
+                      {k} — {v}
+                    </option>
+                  ))}
+                </select>
+              </CampoForm>
+            )}
 
             <CampoForm label="Concepto">
               <input
@@ -418,7 +644,8 @@ export default function CuentasPorCobrar({ onVolver }) {
                   <div>
                     <div style={{ fontWeight: 600 }}>{formatoCOP(g.monto)}</div>
                     <div style={{ fontSize: 12, color: "#777" }}>
-                      {formatoFechaHora(g.fecha)} · {g.metodo_pago} · {g.concepto}
+                      {formatoFechaHora(g.fecha)} · {g.metodo_pago}
+                      {g.tipo_cuenta ? ` · ${nombreCuenta(g.tipo_cuenta)}` : ""} · {g.concepto}
                     </div>
                   </div>
                   <button style={{ ...btnMini, color: COLOR_ROJO }} onClick={() => pedirEliminarAbono(g)}>

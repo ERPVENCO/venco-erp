@@ -3,10 +3,25 @@ import { supabase } from './supabase'
 import ModalEliminar from './ModalEliminar'
 import CuentasPorPagar from './CuentasPorPagar'
 import CuentasPorCobrar from './CuentasPorCobrar'
+import { Saldos, Extracto } from './CuentasSaldos' // NUEVO (1/4)
 
 const CUENTAS = { '1': 'Bancolombia Yohe', '2': 'Bancolombia Manu', '3': 'Nequi Yohe' }
 const hoyISO = () => new Date().toISOString().split('T')[0]
 const primerDiaMes = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0] }
+// NUEVO: registra en la tabla auditoria, igual que Ventas y Compras. Si falla, no interrumpe la operación.
+const auditar = async (accion, tabla, descripcion, datosAnteriores = null) => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser()
+    await supabase.from('auditoria').insert([{
+      tabla, accion, descripcion, datos_anteriores: datosAnteriores,
+      usuario_email: user?.email || 'desconocido', fecha: new Date().toISOString()
+    }])
+  } catch (e) {
+    console.error('Auditoría:', e)
+  }
+}
+// NUEVO: Compras guarda "transferencia cuenta 1" en metodo_pago (sin columna de cuenta). Esto saca el número.
+const cuentaDeMetodo = (m) => { const x = /transferencia cuenta (\d)/i.exec(m || ''); return x ? x[1] : null }
 
 export default function Finanzas() {
   const [seccion, setSeccion] = useState('menu')
@@ -81,11 +96,13 @@ function Caja({ onVolver }) {
         <div style={{ fontSize: 16, fontWeight: 700 }}>🧾 Caja</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 18, flexWrap: 'wrap' }}>
         {[
           { id: 'ingresos', label: '📥 Ingresos' },
           { id: 'egresos', label: '📤 Egresos y Gastos' },
           { id: 'balance', label: '⚖️ Balance' },
+          { id: 'saldos', label: '🏦 Cuentas y saldos' }, // NUEVO (2/4)
+          { id: 'extracto', label: '📒 Extracto' }, // NUEVO (2/4)
         ].map(t => (
           <button key={t.id} onClick={() => setVista(t.id)} style={{
             padding: '8px 18px', borderRadius: 20, fontSize: 13, fontWeight: 600,
@@ -99,14 +116,19 @@ function Caja({ onVolver }) {
         ))}
       </div>
 
-      <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 18, display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
-        <div><label style={lbl}>DESDE</label><input type="date" value={desde} onChange={e => setDesde(e.target.value)} style={inp} /></div>
-        <div><label style={lbl}>HASTA</label><input type="date" value={hasta} onChange={e => setHasta(e.target.value)} style={inp} /></div>
-      </div>
+      {/* NUEVO (3/4): el saldo actual no depende de fechas, así que se oculta el filtro en esa pestaña */}
+      {vista !== 'saldos' && (
+        <div style={{ background: '#F4F1ED', borderRadius: 8, padding: 14, marginBottom: 18, display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
+          <div><label style={lbl}>DESDE</label><input type="date" value={desde} onChange={e => setDesde(e.target.value)} style={inp} /></div>
+          <div><label style={lbl}>HASTA</label><input type="date" value={hasta} onChange={e => setHasta(e.target.value)} style={inp} /></div>
+        </div>
+      )}
 
       {vista === 'ingresos' && <Ingresos desde={desde} hasta={hasta} />}
       {vista === 'egresos' && <Egresos desde={desde} hasta={hasta} />}
       {vista === 'balance' && <Balance desde={desde} hasta={hasta} />}
+      {vista === 'saldos' && <Saldos />}{/* NUEVO (4/4) */}
+      {vista === 'extracto' && <Extracto desde={desde} hasta={hasta} />}{/* NUEVO (4/4) */}
     </div>
   )
 }
@@ -120,6 +142,14 @@ function Ingresos({ desde, hasta }) {
   const [loading, setLoading] = useState(true)
   const [filtroCliente, setFiltroCliente] = useState('')
   const [filtroPago, setFiltroPago] = useState('')
+
+  // NUEVO: ingresos manuales (aportes, préstamos recibidos, intereses, etc.)
+  const TIPOS_INGRESO = ['Aporte de socio', 'Préstamo recibido', 'Intereses', 'Devolución', 'Otro ingreso']
+  const ingresoVacio = { fecha: hoyISO(), tipo: 'Aporte de socio', detalle: '', forma_pago: 'efectivo', cuenta: '', monto: '' }
+  const [mostrarFormIngreso, setMostrarFormIngreso] = useState(false)
+  const [formIngreso, setFormIngreso] = useState(ingresoVacio)
+  const [guardandoIngreso, setGuardandoIngreso] = useState(false)
+  const [ingresoAEliminar, setIngresoAEliminar] = useState(null)
 
   useEffect(() => { cargar(); cargarClientes() }, [desde, hasta])
 
@@ -148,6 +178,35 @@ function Ingresos({ desde, hasta }) {
     setClientes(data || [])
   }
 
+  // NUEVO: guardar ingreso manual (no ligado a una venta)
+  const guardarIngreso = async () => {
+    const monto = parseFloat(formIngreso.monto) || 0
+    if (monto <= 0) { alert('Ingresa el monto'); return }
+    if (!formIngreso.detalle.trim()) { alert('Ingresa el detalle (de quién viene o por qué)'); return }
+    if (formIngreso.forma_pago === 'transferencia' && !formIngreso.cuenta) { alert('Elige a qué cuenta entró la transferencia'); return }
+    setGuardandoIngreso(true)
+    const { error } = await supabase.from('ingresos').insert([{
+      venta_id: null,
+      concepto: `${formIngreso.tipo}: ${formIngreso.detalle.trim()}`,
+      metodo_pago: formIngreso.forma_pago,
+      tipo_cuenta: formIngreso.forma_pago === 'transferencia' ? formIngreso.cuenta : null,
+      monto,
+      fecha: formIngreso.fecha + 'T12:00:00'
+    }])
+    setGuardandoIngreso(false)
+    if (error) { alert('Error: ' + error.message); return }
+    await auditar('INGRESO MANUAL', 'ingresos', `${formIngreso.tipo}: ${formIngreso.detalle.trim()} — $${monto.toLocaleString('es-CO')} (${formIngreso.forma_pago})`)
+    setMostrarFormIngreso(false)
+    setFormIngreso(ingresoVacio)
+    cargar()
+  }
+
+  const eliminarIngreso = async () => {
+    await supabase.from('ingresos').delete().eq('id', ingresoAEliminar.id)
+    setIngresoAEliminar(null)
+    cargar()
+  }
+
   const filtrados = ingresos.filter(i => {
     if (filtroCliente && i.venta?.cliente_nombre !== filtroCliente) return false
     if (filtroPago && i.metodo_pago !== filtroPago) return false
@@ -159,8 +218,16 @@ function Ingresos({ desde, hasta }) {
   const inp = { padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, background: '#F4F1ED' }
   const lbl = { fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }
 
+  const inpForm = { ...inp, width: '100%', boxSizing: 'border-box' }
+
   return (
     <div>
+      {ingresoAEliminar && (
+        <ModalEliminar item={ingresoAEliminar} tabla="ingresos"
+          descripcion={`${ingresoAEliminar.concepto} — $${ingresoAEliminar.monto?.toLocaleString('es-CO')}`}
+          onConfirm={eliminarIngreso} onCancel={() => setIngresoAEliminar(null)} />
+      )}
+
       <div style={{ display: 'flex', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
         <div>
           <label style={lbl}>CLIENTE</label>
@@ -177,7 +244,53 @@ function Ingresos({ desde, hasta }) {
             <option value="transferencia">Transferencia</option>
           </select>
         </div>
+        <div style={{ marginLeft: 'auto', alignSelf: 'end' }}>
+          <button onClick={() => setMostrarFormIngreso(true)} style={{ background: '#1A9156', color: '#fff', border: 'none', borderRadius: 7, padding: '9px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+            ＋ Nuevo Ingreso
+          </button>
+        </div>
       </div>
+
+      {/* NUEVO: formulario de ingreso manual */}
+      {mostrarFormIngreso && (
+        <div style={{ background: '#fff', border: '1px solid #DDD8CF', borderRadius: 9, padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Nuevo Ingreso (no ligado a una venta)</div>
+          <div style={{ fontSize: 12, color: '#9A8E85', marginBottom: 14 }}>Para aportes de socios, préstamos recibidos, intereses u otros ingresos. Las ventas y los abonos de clientes se registran solos desde Ventas y Cuentas por Cobrar.</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+            <div><label style={lbl}>FECHA</label><input type="date" value={formIngreso.fecha} onChange={e => setFormIngreso({ ...formIngreso, fecha: e.target.value })} style={inpForm} /></div>
+            <div>
+              <label style={lbl}>TIPO DE INGRESO</label>
+              <select value={formIngreso.tipo} onChange={e => setFormIngreso({ ...formIngreso, tipo: e.target.value })} style={inpForm}>
+                {TIPOS_INGRESO.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div style={{ gridColumn: '1 / -1' }}><label style={lbl}>DETALLE</label><input value={formIngreso.detalle} onChange={e => setFormIngreso({ ...formIngreso, detalle: e.target.value })} placeholder="Ej. Aporte de Manu para capital de trabajo" style={inpForm} /></div>
+            <div>
+              <label style={lbl}>FORMA DE PAGO</label>
+              <select value={formIngreso.forma_pago} onChange={e => setFormIngreso({ ...formIngreso, forma_pago: e.target.value, cuenta: '' })} style={inpForm}>
+                <option value="efectivo">Efectivo</option>
+                <option value="transferencia">Transferencia</option>
+              </select>
+            </div>
+            <div><label style={lbl}>MONTO</label><input type="number" value={formIngreso.monto} onChange={e => setFormIngreso({ ...formIngreso, monto: e.target.value })} placeholder="0" style={inpForm} /></div>
+            {formIngreso.forma_pago === 'transferencia' && (
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={lbl}>ENTRÓ A LA CUENTA</label>
+                <select value={formIngreso.cuenta} onChange={e => setFormIngreso({ ...formIngreso, cuenta: e.target.value })} style={inpForm}>
+                  <option value="">Selecciona...</option>
+                  {Object.entries(CUENTAS).map(([k, v]) => <option key={k} value={k}>{k} — {v.toUpperCase()}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+            <button onClick={() => { setMostrarFormIngreso(false); setFormIngreso(ingresoVacio) }} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
+            <button onClick={guardarIngreso} disabled={guardandoIngreso} style={{ padding: '8px 16px', background: '#1A9156', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {guardandoIngreso ? 'Guardando...' : 'Guardar ingreso'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div style={{ background: '#E8F7EF', borderRadius: 9, padding: 16, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ fontSize: 13, color: '#1A9156', fontWeight: 600 }}>{loading ? '...' : `${filtrados.length} ingresos`}</div>
@@ -195,7 +308,7 @@ function Ingresos({ desde, hasta }) {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ background: '#F4F1ED' }}>
-                {['N°', 'Fecha', 'Detalle', 'Cliente', 'Forma de pago', 'Tipo de cuenta', 'N° Factura', 'Valor'].map(h => (
+                {['N°', 'Fecha', 'Detalle', 'Cliente', 'Forma de pago', 'Tipo de cuenta', 'N° Factura', 'Valor', ''].map(h => (
                   <th key={h} style={{ padding: '9px 16px', fontSize: 10, color: '#9A8E85', textAlign: 'left', borderBottom: '1px solid #DDD8CF', fontWeight: 500 }}>{h}</th>
                 ))}
               </tr>
@@ -208,9 +321,14 @@ function Ingresos({ desde, hasta }) {
                   <td style={{ padding: '10px 16px', fontSize: 13 }}>{i.concepto || 'Venta'}</td>
                   <td style={{ padding: '10px 16px', fontSize: 13, fontWeight: 600 }}>{i.venta?.cliente_nombre || '—'}</td>
                   <td style={{ padding: '10px 16px', fontSize: 13 }}>{i.metodo_pago || '—'}</td>
-                  <td style={{ padding: '10px 16px', fontSize: 13 }}>{i.venta?.tipo_cuenta ? CUENTAS[i.venta.tipo_cuenta] : '—'}</td>
+                  <td style={{ padding: '10px 16px', fontSize: 13 }}>{(i.tipo_cuenta || i.venta?.tipo_cuenta) ? ((i.tipo_cuenta || i.venta.tipo_cuenta) === 'efectivo' ? 'Efectivo' : CUENTAS[i.tipo_cuenta || i.venta.tipo_cuenta]) : '—'}</td>
                   <td style={{ padding: '10px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222' }}>{i.venta?.folio || '—'}</td>
                   <td style={{ padding: '10px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#1A9156' }}>${(i.monto || 0).toLocaleString('es-CO')}</td>
+                  <td style={{ padding: '8px 16px' }}>
+                    {!i.venta_id && (
+                      <button onClick={() => setIngresoAEliminar(i)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>🗑️</button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -399,7 +517,7 @@ function Egresos({ desde, hasta }) {
   }
 
   const cargarProveedores = async () => {
-    const { data } = await supabase.from('proveedores').select('id, nombre').order('nombre')
+    const { data } = await supabase.from('proveedores').select('id, empresa').order('empresa') // CORREGIDO: la columna es empresa
     setProveedores(data || [])
   }
 
@@ -634,7 +752,7 @@ function Egresos({ desde, hasta }) {
             <label style={lbl}>PROVEEDOR</label>
             <select value={filtroProveedor} onChange={e => setFiltroProveedor(e.target.value)} style={inp}>
               <option value="">Todos</option>
-              {proveedores.map(p => <option key={p.id} value={p.nombre}>{p.nombre}</option>)}
+              {proveedores.map(p => <option key={p.id} value={p.empresa}>{p.empresa}</option>)}
             </select>
           </div>
           <div>
@@ -797,11 +915,11 @@ function Balance({ desde, hasta }) {
     setError('')
 
     const { data: ingresos, error: errIng } = await supabase
-      .from('ingresos').select('monto, venta_id')
+      .from('ingresos').select('*') // NUEVO: '*' para leer también tipo_cuenta de los ingresos manuales
       .gte('fecha', desde).lte('fecha', hasta + 'T23:59:59')
 
     const { data: egresos, error: errEgr } = await supabase
-      .from('egresos').select('monto, tipo_cuenta, monto_efectivo, monto_transferencia_1, tipo_cuenta_1, monto_transferencia_2, tipo_cuenta_2')
+      .from('egresos').select('monto, metodo_pago, tipo_cuenta, monto_efectivo, monto_transferencia_1, tipo_cuenta_1, monto_transferencia_2, tipo_cuenta_2')
       .gte('fecha', desde).lte('fecha', hasta + 'T23:59:59')
 
     // Dinero reservado para provisiones laborales (prima, cesantías, intereses, vacaciones), por cuenta.
@@ -839,7 +957,7 @@ function Balance({ desde, hasta }) {
     cuentasResumen['efectivo'] = { ingresos: 0, egresos: 0 }
 
     for (const i of ingresos || []) {
-      const cuenta = ventasMap[i.venta_id]?.tipo_cuenta || 'efectivo'
+      const cuenta = i.tipo_cuenta || ventasMap[i.venta_id]?.tipo_cuenta || 'efectivo' // NUEVO: primero la cuenta del propio ingreso
       if (!cuentasResumen[cuenta]) cuentasResumen[cuenta] = { ingresos: 0, egresos: 0 }
       cuentasResumen[cuenta].ingresos += i.monto || 0
     }
@@ -856,7 +974,7 @@ function Balance({ desde, hasta }) {
           cuentasResumen[e.tipo_cuenta_2].egresos += e.monto_transferencia_2
         }
       } else {
-        const cuenta = e.tipo_cuenta || 'efectivo'
+        const cuenta = e.tipo_cuenta || cuentaDeMetodo(e.metodo_pago) || 'efectivo' // NUEVO: compras por transferencia
         if (!cuentasResumen[cuenta]) cuentasResumen[cuenta] = { ingresos: 0, egresos: 0 }
         cuentasResumen[cuenta].egresos += e.monto || 0
       }

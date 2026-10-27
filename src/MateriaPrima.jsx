@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
 
+// supabase-js NO lanza excepción cuando algo falla: devuelve { error }.
+// Con este helper los fallos dejan de pasar en silencio.
+const ok = (res) => { if (res.error) throw new Error(res.error.message); return res.data }
+
 export default function MateriaPrima() {
   const [productos, setProductos] = useState([])
   const [loading, setLoading] = useState(true)
@@ -8,6 +12,7 @@ export default function MateriaPrima() {
   const [filtroCategoria, setFiltroCategoria] = useState('todos')
   const [editando, setEditando] = useState(null)
   const [materiaDetalle, setMateriaDetalle] = useState(null)
+  const [guardando, setGuardando] = useState(false)
   const [nuevo, setNuevo] = useState({
     nombre: '', categoria_mp: 'materia_prima',
     precio_kg: '', stock_actual: '', stock_minimo: '',
@@ -64,12 +69,16 @@ export default function MateriaPrima() {
     ? `${generarPrefijo(nuevo.categoria_mp)}-${generarIniciales(nuevo.nombre)}-001`
     : '—'
 
+  // El costo que se muestra en la tabla es el costo promedio (o el precio si aún no hay promedio),
+  // así que ese es el que se carga en el formulario para editar.
+  const costoMostrado = (p) => p.costo_promedio ?? p.precio_kg
+
   const abrirEditar = (p) => {
     setEditando(p)
     setNuevo({
       nombre: p.nombre || '',
       categoria_mp: p.categoria_mp || 'materia_prima',
-      precio_kg: p.precio_kg ?? '',
+      precio_kg: costoMostrado(p) ?? '',
       stock_actual: p.stock_actual ?? '',
       stock_minimo: p.stock_minimo ?? '',
       unidad: p.unidad || 'kg',
@@ -89,41 +98,91 @@ export default function MateriaPrima() {
   const guardar = async () => {
     if (!nuevo.nombre) { alert('El nombre es obligatorio'); return }
     if (!nuevo.precio_kg) { alert('El costo es obligatorio'); return }
+    if (guardando) return
 
     if (editando) {
-      // No se toca el código ni el costo_promedio (ponderado por compras) al editar manualmente
-      const { error } = await supabase.from('productos').update({
-        nombre: nuevo.nombre,
-        categoria_mp: nuevo.categoria_mp,
-        precio_kg: parseFloat(nuevo.precio_kg) || 0,
-        stock_actual: parseFloat(nuevo.stock_actual) || 0,
-        stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
-        unidad: nuevo.unidad,
-        codigo_barras: nuevo.codigo_barras,
-        fecha_caducidad: nuevo.fecha_caducidad || null,
-        informacion_adicional: nuevo.informacion_adicional,
-      }).eq('id', editando.id)
-      if (error) { alert('Error: ' + error.message); return }
+      const costoNuevo = parseFloat(nuevo.precio_kg) || 0
+      const cambioCosto = costoNuevo !== (parseFloat(costoMostrado(editando)) || 0)
+      const stockNuevo = parseFloat(nuevo.stock_actual) || 0
+      const cambioStock = stockNuevo !== (parseFloat(editando.stock_actual) || 0)
+
+      // Cambiar la cantidad a mano NO ajusta los lotes: el stock y los lotes dejan de cuadrar
+      if (cambioStock && !window.confirm(
+        `Cambiaste la cantidad actual de ${editando.stock_actual} a ${stockNuevo}.\n\n` +
+        'Esto NO modifica los lotes y el inventario puede quedar desfasado (producción y ventas descuentan de los lotes).\n' +
+        'Para sumar material usa Compras; para corregirlo bien, pídeme un ajuste por lote.\n\n¿Guardar de todos modos?'
+      )) return
+
+      setGuardando(true)
+      try {
+        // El código y el costo promedio solo se tocan si el usuario cambió el costo a mano
+        ok(await supabase.from('productos').update({
+          nombre: nuevo.nombre,
+          categoria_mp: nuevo.categoria_mp,
+          ...(cambioCosto ? { precio_kg: costoNuevo, costo_promedio: costoNuevo } : {}),
+          stock_actual: stockNuevo,
+          stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
+          unidad: nuevo.unidad,
+          codigo_barras: nuevo.codigo_barras,
+          fecha_caducidad: nuevo.fecha_caducidad || null,
+          informacion_adicional: nuevo.informacion_adicional,
+        }).eq('id', editando.id))
+
+        if (cambioCosto || cambioStock) {
+          const { data: { user } } = await supabase.auth.getUser()
+          await supabase.from('auditoria').insert([{
+            tabla: 'productos', accion: 'EDICIÓN',
+            descripcion: `${editando.codigo} — ${editando.nombre}` +
+              (cambioCosto ? ` — Costo: $${costoMostrado(editando)} → $${costoNuevo}` : '') +
+              (cambioStock ? ` — Stock: ${editando.stock_actual} → ${stockNuevo} (manual)` : ''),
+            datos_anteriores: editando, usuario_email: user?.email || 'desconocido', fecha: new Date().toISOString()
+          }])
+        }
+      } catch (e) {
+        alert('Error: ' + e.message)
+        setGuardando(false)
+        return
+      }
     } else {
-      const codigo = await generarCodigo(nuevo.nombre, nuevo.categoria_mp)
-      const { error } = await supabase.from('productos').insert([{
-        codigo,
-        nombre: nuevo.nombre,
-        categoria: 'materia_prima',
-        categoria_mp: nuevo.categoria_mp,
-        tipo_inventario: 'materia_prima',
-        precio_kg: parseFloat(nuevo.precio_kg) || 0,
-        costo_promedio: parseFloat(nuevo.precio_kg) || 0,
-        stock_actual: parseFloat(nuevo.stock_actual) || 0,
-        stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
-        unidad: nuevo.unidad,
-        codigo_barras: nuevo.codigo_barras,
-        fecha_caducidad: nuevo.fecha_caducidad || null,
-        informacion_adicional: nuevo.informacion_adicional,
-      }])
-      if (error) { alert('Error: ' + error.message); return }
+      setGuardando(true)
+      try {
+        const codigo = await generarCodigo(nuevo.nombre, nuevo.categoria_mp)
+        const stockInicial = parseFloat(nuevo.stock_actual) || 0
+        const costo = parseFloat(nuevo.precio_kg) || 0
+        const creado = ok(await supabase.from('productos').insert([{
+          codigo,
+          nombre: nuevo.nombre,
+          categoria: 'materia_prima',
+          categoria_mp: nuevo.categoria_mp,
+          tipo_inventario: 'materia_prima',
+          precio_kg: costo,
+          costo_promedio: costo,
+          stock_actual: stockInicial,
+          stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
+          unidad: nuevo.unidad,
+          codigo_barras: nuevo.codigo_barras,
+          fecha_caducidad: nuevo.fecha_caducidad || null,
+          informacion_adicional: nuevo.informacion_adicional,
+        }]).select())
+
+        // La cantidad inicial queda respaldada por un lote; sin lote, producción y ventas no pueden usarla
+        if (stockInicial > 0 && creado?.[0]) {
+          const { error: errLote } = await supabase.from('lotes').insert([{
+            producto_id: creado[0].id, codigo_lote: `INI-${codigo}`,
+            cantidad_inicial: stockInicial, cantidad_actual: stockInicial,
+            fecha_ingreso: new Date().toISOString().split('T')[0],
+            fecha_vencimiento: nuevo.fecha_caducidad || null
+          }])
+          if (errLote) alert(`El insumo se creó, pero no se pudo crear su lote inicial (${errLote.message}). Su cantidad no será utilizable hasta que lo hagas por una compra.`)
+        }
+      } catch (e) {
+        alert('Error: ' + e.message)
+        setGuardando(false)
+        return
+      }
     }
 
+    setGuardando(false)
     cerrarForm()
     cargar()
   }
@@ -131,40 +190,45 @@ export default function MateriaPrima() {
   const eliminar = async (p) => {
     const { data: enUso } = await supabase
       .from('producto_ingredientes')
-      .select('id')
+      .select('*')
       .eq('materia_prima_id', p.id)
 
     const estaEnUso = enUso && enUso.length > 0
 
     const mensaje = estaEnUso
-      ? `⚠️ No se puede eliminar porque está siendo utilizado en un ingrediente.\n\n¿Estás segura de que deseas eliminarlo? Ten en cuenta que también se eliminará el ingrediente del producto.`
+      ? `⚠️ Este insumo está siendo utilizado en el ingrediente de algún producto.\n\n¿Estás segura de que deseas eliminarlo? También se quitará de la receta de esos productos.`
       : `¿Estás segura que deseas eliminar "${p.nombre}"?`
 
     const confirmar = window.confirm(mensaje)
     if (!confirmar) return
 
-    if (estaEnUso) {
-      await supabase.from('producto_ingredientes').delete().eq('materia_prima_id', p.id)
+    try {
+      if (estaEnUso) {
+        ok(await supabase.from('producto_ingredientes').delete().eq('materia_prima_id', p.id))
+      }
+
+      // Si el insumo tiene historial (lotes, compras, producciones) la base no deja borrarlo:
+      // en ese caso se devuelven los ingredientes que se acababan de quitar para no dañar las recetas
+      const { error } = await supabase.from('productos').delete().eq('id', p.id)
+      if (error) {
+        if (estaEnUso) await supabase.from('producto_ingredientes').insert(enUso)
+        alert(`No se pudo eliminar "${p.nombre}": ${error.message}\n\nSi ya tiene compras, lotes o producciones no se puede borrar. Las recetas quedaron como estaban.`)
+        return
+      }
+
+      const { data: { user } } = await supabase.auth.getUser()
+      await supabase.from('auditoria').insert([{
+        tabla: 'productos',
+        accion: 'ELIMINACIÓN',
+        descripcion: `${p.codigo} — ${p.nombre}${estaEnUso ? ' (también se eliminaron ingredientes vinculados)' : ''}`,
+        datos_anteriores: p,
+        usuario_email: user?.email || 'desconocido',
+        fecha: new Date().toISOString()
+      }])
+    } catch (e) {
+      alert('Error al eliminar: ' + e.message)
     }
-
-    const { data: { user } } = await supabase.auth.getUser()
-
-    await supabase.from('auditoria').insert([{
-      tabla: 'productos',
-      accion: 'ELIMINACIÓN',
-      descripcion: `${p.codigo} — ${p.nombre}${estaEnUso ? ' (también se eliminaron ingredientes vinculados)' : ''}`,
-      datos_anteriores: p,
-      usuario_email: user?.email || 'desconocido',
-      fecha: new Date().toISOString()
-    }])
-
-    const { error } = await supabase.from('productos').delete().eq('id', p.id)
-
-    if (error) {
-      alert('Error al eliminar: ' + error.message)
-    } else {
-      cargar()
-    }
+    cargar()
   }
 
   const estadoStock = (actual, minimo) => {
@@ -207,7 +271,7 @@ export default function MateriaPrima() {
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>UNIDAD</span><br/>{materiaDetalle.unidad}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>STOCK ACTUAL</span><br/>{materiaDetalle.stock_actual} {materiaDetalle.unidad}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>STOCK MÍNIMO</span><br/>{materiaDetalle.stock_minimo} {materiaDetalle.unidad}</div>
-              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>COSTO PROMEDIO</span><br/>${(materiaDetalle.costo_promedio ?? materiaDetalle.precio_kg)?.toLocaleString('es-CO')}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>COSTO PROMEDIO</span><br/>${costoMostrado(materiaDetalle)?.toLocaleString('es-CO')}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>ÚLTIMO COSTO</span><br/>{materiaDetalle.ultimo_costo ? `$${materiaDetalle.ultimo_costo?.toLocaleString('es-CO')}` : '—'}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CÓDIGO DE BARRAS</span><br/>{materiaDetalle.codigo_barras || '—'}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CADUCIDAD</span><br/>{materiaDetalle.fecha_caducidad || '—'}</div>
@@ -267,6 +331,7 @@ export default function MateriaPrima() {
               <div>
                 <label style={lbl}>COSTO / UNIDAD *</label>
                 <input type="number" value={nuevo.precio_kg} onChange={e => setNuevo({...nuevo, precio_kg: e.target.value})} placeholder="0" style={inp} />
+                {editando && <div style={{ fontSize: 10, color: '#9A8E85', marginTop: 3 }}>Es el costo promedio que ves en la tabla. Si lo cambias, queda como nuevo costo promedio.</div>}
               </div>
               <div>
                 <label style={lbl}>CATEGORÍA *</label>
@@ -300,6 +365,9 @@ export default function MateriaPrima() {
               <div>
                 <label style={lbl}>CANTIDAD {editando ? 'ACTUAL' : 'INICIAL'}</label>
                 <input type="number" value={nuevo.stock_actual} onChange={e => setNuevo({...nuevo, stock_actual: e.target.value})} placeholder="0" style={inp} />
+                {editando
+                  ? <div style={{ fontSize: 10, color: '#C07D00', marginTop: 3 }}>⚠️ Cambiarla aquí no ajusta los lotes. Para sumar material usa Compras.</div>
+                  : <div style={{ fontSize: 10, color: '#9A8E85', marginTop: 3 }}>Si pones una cantidad, se crea un lote inicial para poder usarla.</div>}
               </div>
               <div>
                 <label style={lbl}>CANTIDAD MÍNIMA</label>
@@ -320,8 +388,8 @@ export default function MateriaPrima() {
 
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
             <button onClick={cerrarForm} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
-            <button onClick={guardar} style={{ padding: '8px 16px', background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-              {editando ? 'Actualizar' : 'Guardar'}
+            <button onClick={guardar} disabled={guardando} style={{ padding: '8px 16px', background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {guardando ? 'Guardando...' : editando ? 'Actualizar' : 'Guardar'}
             </button>
           </div>
         </div>
@@ -361,9 +429,9 @@ export default function MateriaPrima() {
                       <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{p.unidad}</td>
                       <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.stock_actual} {p.unidad}</td>
                       <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.stock_minimo} {p.unidad}</td>
-                      {/* Costo promedio ponderado — se actualiza automáticamente con cada compra */}
+                      {/* Costo promedio ponderado — se actualiza con cada compra, o al editar el costo a mano */}
                       <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#1A5FA8', whiteSpace: 'nowrap' }}>
-                        ${(p.costo_promedio ?? p.precio_kg)?.toLocaleString('es-CO')}
+                        ${costoMostrado(p)?.toLocaleString('es-CO')}
                       </td>
                       {/* Último costo pagado en la compra más reciente */}
                       <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#9A8E85', whiteSpace: 'nowrap' }}>

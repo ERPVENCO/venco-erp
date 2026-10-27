@@ -48,4 +48,4 @@ export default function KPICard({ kpi, onClick }) {
       )}
     </div>
   );
-}
+} 

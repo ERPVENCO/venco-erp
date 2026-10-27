@@ -343,6 +343,14 @@ export default function App() {
       {moduloActivo === 'calidad' && <Calidad />}
     </>
   )
+  if (moduloActivo === 'reportes') {
+  return (
+    <div style={{ minHeight: '100vh', background: '#F4F1ED' }}>
+      <ReportesHome onSalir={() => setModulo('dashboard')} />
+      {vozAsistente}
+    </div>
+  )
+}
 
   // =========================================================
   // PC

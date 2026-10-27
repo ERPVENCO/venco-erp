@@ -3,12 +3,17 @@ import { supabase } from './supabase'
 
 const CLAVE_ELIMINACION = '1234'
 
-export default function ModalEliminar({ item, tabla, descripcion, onConfirm, onCancel }) {
+// registrarAuditoria (por defecto true): el modal escribe la fila de auditoría ANTES de eliminar.
+// Los módulos que revierten inventario (Compras, Ventas, Producción, Batches) escriben su propia
+// auditoría DESPUÉS de que el borrado salió bien, así que pasan registrarAuditoria={false}
+// para no duplicarla ni registrar como "eliminado" algo que la base rechazó.
+export default function ModalEliminar({ item, tabla, descripcion, onConfirm, onCancel, registrarAuditoria = true }) {
   const [clave, setClave] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   const confirmar = async () => {
+    if (loading) return // ignora clics repetidos mientras se elimina
     if (clave !== CLAVE_ELIMINACION) {
       setError('Contraseña incorrecta')
       return
@@ -16,19 +21,23 @@ export default function ModalEliminar({ item, tabla, descripcion, onConfirm, onC
     setLoading(true)
     setError('')
 
-    // Registrar en auditoría
-    const { data: { user } } = await supabase.auth.getUser()
-    await supabase.from('auditoria').insert([{
-      tabla,
-      accion: 'ELIMINACIÓN',
-      descripcion,
-      datos_anteriores: item,
-      usuario_email: user?.email || 'desconocido',
-      fecha: new Date().toISOString()
-    }])
-
-    setLoading(false)
-    onConfirm()
+    try {
+      if (registrarAuditoria) {
+        const { data: { user } } = await supabase.auth.getUser()
+        await supabase.from('auditoria').insert([{
+          tabla,
+          accion: 'ELIMINACIÓN',
+          descripcion,
+          datos_anteriores: item,
+          usuario_email: user?.email || 'desconocido',
+          fecha: new Date().toISOString()
+        }])
+      }
+      // Se espera a que termine el borrado: así el botón sigue bloqueado hasta que acabe
+      await onConfirm()
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -85,9 +94,9 @@ export default function ModalEliminar({ item, tabla, descripcion, onConfirm, onC
 
         {/* Botones */}
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button onClick={onCancel} style={{
+          <button onClick={onCancel} disabled={loading} style={{
             padding: '8px 18px', border: '1px solid #DDD8CF', borderRadius: 7,
-            background: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500
+            background: 'none', cursor: loading ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 500
           }}>Cancelar</button>
           <button onClick={confirmar} disabled={loading || !clave} style={{
             padding: '8px 18px', background: loading || !clave ? '#ccc' : '#B22222',

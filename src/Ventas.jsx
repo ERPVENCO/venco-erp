@@ -5,6 +5,13 @@ import DocumentoVenta from './DocumentoVenta'
 
 const CLAVE_EDICION = '1234'
 
+// supabase-js NO lanza excepción cuando algo falla: devuelve { error }.
+// Con este helper los fallos dejan de pasar en silencio.
+const ok = (res) => { if (res.error) throw new Error(res.error.message); return res.data }
+
+// NUEVO: las deudas anteriores al sistema se crean desde Cuentas por Cobrar con folio ANT-xxxx
+const esSaldoAnterior = (folio) => String(folio || '').startsWith('ANT-')
+
 // ── Helpers de fecha/hora LOCAL (evitan que toISOString() salte al día siguiente) ──
 // new Date().toISOString() siempre convierte a UTC. En Colombia (UTC-5), desde
 // aprox. las 7pm en adelante, la fecha UTC ya es la del día siguiente. Estas
@@ -20,6 +27,35 @@ const fechaHoraLocalAhora = () => {
   const d = new Date()
   const offset = d.getTimezoneOffset() * 60000
   return new Date(d.getTime() - offset).toISOString().slice(0, 16)
+}
+
+// Fecha local (YYYY-MM-DD) de un instante guardado en la base (que está en UTC)
+const fechaLocalDe = (fecha) => {
+  const d = new Date(fecha)
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+}
+
+// Une el DÍA elegido en el formulario con una HORA real:
+//  - venta nueva: la hora actual (si el día es hoy, el instante exacto)
+//  - edición: conserva la hora original de la venta aunque cambie el día
+// Antes se guardaba siempre a las 12:00 del día elegido, por eso la factura impresa decía 12:00 pm.
+const timestampDeVenta = (fechaStr, creadoOriginal) => {
+  const base = creadoOriginal ? new Date(creadoOriginal) : new Date()
+  if (!creadoOriginal && fechaStr === fechaLocalHoy()) return base.toISOString()
+  if (creadoOriginal && fechaLocalDe(base) === fechaStr) return base.toISOString()
+  const d = new Date(`${fechaStr}T00:00:00`)
+  d.setHours(base.getHours(), base.getMinutes(), base.getSeconds(), 0)
+  return d.toISOString()
+}
+
+// Lotes con saldo de un producto. En edición, "addBack" suma lo que la propia venta ya había
+// consumido (porque al guardar se revierte primero), e incluye lotes que quedaron en 0 por ella.
+const fetchLotesDisp = async (producto_id, addBack = {}) => {
+  const ids = Object.keys(addBack)
+  let q = supabase.from('lotes').select('*').eq('producto_id', producto_id).order('fecha_ingreso', { ascending: true })
+  q = ids.length ? q.or(`cantidad_actual.gt.0,id.in.(${ids.join(',')})`) : q.gt('cantidad_actual', 0)
+  const { data } = await q
+  return (data || []).map(l => ({ ...l, cantidad_actual: (parseFloat(l.cantidad_actual) || 0) + (addBack[l.id] || 0) }))
 }
 
 export default function Ventas() {
@@ -79,9 +115,16 @@ export default function Ventas() {
   // Referencias para el manejo de "cantidad" sin bloquear el input mientras se consulta la BD
   const itemsRef = useRef(items)
   const debounceLotesRef = useRef({})
+  // Evitan dobles clics, y llevan el control de la edición (lo que la venta ya consumió)
+  const eliminandoRef = useRef(false)
+  const guardandoRef = useRef(false)
+  const addBackRef = useRef({})      // lote_id -> cantidad que la venta en edición ya había consumido
+  const revertidoRef = useRef(false) // true si al editar ya se revirtió lo anterior (para no revertir dos veces)
   useEffect(() => { itemsRef.current = items }, [items])
 
   useEffect(() => { cargar(); cargarClientes(); cargarProductos(); cargarVendedores() }, [])
+
+  const ventaVacia = () => ({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: fechaLocalHoy() })
 
   const cargar = async () => {
     setLoading(true)
@@ -132,18 +175,14 @@ export default function Ventas() {
     const cant = parseFloat(cantidad) || 0
     if (!producto_id || cant <= 0) return { lotes_disponibles: [], lotes_usados: [] }
 
-    const { data: lotes } = await supabase
-      .from('lotes')
-      .select('*')
-      .eq('producto_id', producto_id)
-      .gt('cantidad_actual', 0)
-      .order('fecha_ingreso', { ascending: true })
+    const lotes = await fetchLotesDisp(producto_id, addBackRef.current)
 
     const lotes_usados = []
     let restante = cant
-    for (const lote of (lotes || [])) {
+    for (const lote of lotes) {
       if (restante <= 0) break
       const usar = Math.min(lote.cantidad_actual, restante)
+      if (usar <= 0) continue
       lotes_usados.push({
         lote_id: lote.id, codigo_lote: lote.codigo_lote,
         cantidad_usada: parseFloat(usar.toFixed(4)), disponible: lote.cantidad_actual
@@ -151,7 +190,7 @@ export default function Ventas() {
       restante -= usar
     }
 
-    return { lotes_disponibles: lotes || [], lotes_usados }
+    return { lotes_disponibles: lotes, lotes_usados }
   }
 
   // ── Items ──
@@ -283,13 +322,39 @@ export default function Ventas() {
     return { subtotal, descuento, iva, total }
   }
 
-  // ── Abrir formulario para nueva venta ──
+  // ── Abrir / cerrar formulario ──
   const abrirNuevaVenta = () => {
     setEditandoId(null)
     setVentaOriginal(null)
+    addBackRef.current = {}
+    revertidoRef.current = false
     setItems([])
-    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: fechaLocalHoy() })
+    setVenta(ventaVacia())
     setMostrarForm(true)
+  }
+
+  const cerrarFormulario = () => {
+    setMostrarForm(false)
+    setItems([])
+    setEditandoId(null)
+    setVentaOriginal(null)
+    addBackRef.current = {}
+    revertidoRef.current = false
+    setVenta(ventaVacia())
+  }
+
+  const cancelarFormulario = () => {
+    if (editandoId && revertidoRef.current &&
+        !window.confirm('Esta venta ya fue revertida del inventario. Si cancelas ahora quedará sin ítems. ¿Cancelar de todos modos?')) return
+    cerrarFormulario()
+    if (revertidoRef.current) { cargar(); cargarProductos() }
+  }
+
+  // NUEVO: cuenta los abonos (ingresos) registrados contra una venta a crédito
+  const contarAbonos = async (ventaId) => {
+    const { count, error } = await supabase.from('ingresos').select('id', { count: 'exact', head: true }).eq('venta_id', ventaId)
+    if (error) throw new Error(error.message)
+    return count || 0
   }
 
   // ── Pedir clave para editar ──
@@ -307,13 +372,44 @@ export default function Ventas() {
     const v = pidiendoClave
     setPidiendoClave(null)
 
-    // Cargar items de esa venta
+    // NUEVO: un saldo anterior no tiene productos; se gestiona desde Cuentas por Cobrar
+    if (esSaldoAnterior(v.folio)) {
+      alert(`${v.folio} es un saldo anterior (deuda anterior al sistema) y no tiene productos.\nPara corregirlo, elimínalo y vuelve a crearlo desde Finanzas → Cuentas por Cobrar → Saldo anterior.`)
+      return
+    }
+
+    // NUEVO: al editar se borran los ingresos de la venta. Si es a crédito y ya tiene abonos,
+    // esos cobros se perderían y el saldo quedaría mal. Se bloquea la edición.
+    if (v.estado === 'credito') {
+      try {
+        const abonos = await contarAbonos(v.id)
+        if (abonos > 0) {
+          alert(`No se puede editar ${v.folio}: ya tiene ${abonos} abono(s) registrado(s).\nEditarla borraría esos cobros y descuadraría la caja.\nElimina primero los abonos (Finanzas → Cuentas por Cobrar → Historial), edita la venta y vuelve a registrarlos.`)
+          return
+        }
+      } catch (e) {
+        alert('No se pudo verificar si la venta tiene abonos: ' + e.message)
+        return
+      }
+    }
+
+    // Cargar items de esa venta y los lotes que consumieron
     const { data: itemsVenta } = await supabase.from('venta_items').select('*').eq('venta_id', v.id)
+    const itemIds = (itemsVenta || []).map(i => i.id)
+    const { data: lotesOrig } = itemIds.length
+      ? await supabase.from('venta_item_lotes').select('*').in('venta_item_id', itemIds)
+      : { data: [] }
+
+    // Lo que esta venta ya consumió de cada lote: al guardar se revierte primero, así que cuenta como disponible
+    const addBack = {}
+    ;(lotesOrig || []).forEach(l => { addBack[l.lote_id] = (addBack[l.lote_id] || 0) + (parseFloat(l.cantidad_usada) || 0) })
+    addBackRef.current = addBack
+    revertidoRef.current = false
 
     const vendedorEncontrado = vendedores.find(ve => ve.nombre === v.vendedor)
 
     setEditandoId(v.id)
-    setVentaOriginal({ venta: v, items: itemsVenta || [] })
+    setVentaOriginal({ venta: v, items: itemsVenta || [], lotes: lotesOrig || [] })
     setVenta({
       tipo: v.tipo,
       estado: v.estado,
@@ -325,13 +421,12 @@ export default function Ventas() {
       iva: v.iva > 0,
       observaciones: v.observaciones || '',
       fecha_vencimiento: v.fecha_vencimiento || '',
-      fecha: v.creado_en ? new Date(v.creado_en).toISOString().slice(0, 10) : fechaLocalHoy()
+      fecha: v.creado_en ? fechaLocalDe(v.creado_en) : fechaLocalHoy()
     })
 
     const itemsConLotes = await Promise.all((itemsVenta || []).map(async (i) => {
-      const { data: lotesGuardados } = await supabase.from('venta_item_lotes').select('*').eq('venta_item_id', i.id)
-      const { data: lotesDisponibles } = await supabase
-        .from('lotes').select('*').eq('producto_id', i.producto_id).gt('cantidad_actual', 0).order('fecha_ingreso', { ascending: true })
+      const lotesGuardados = (lotesOrig || []).filter(l => l.venta_item_id === i.id)
+      const lotesDisponibles = await fetchLotesDisp(i.producto_id, addBack)
       return {
         producto_id: i.producto_id,
         nombre_producto: i.nombre_producto,
@@ -341,8 +436,11 @@ export default function Ventas() {
         precio_lista: 1,
         precio_unitario: i.precio_unitario,
         subtotal: i.subtotal,
-        lotes_disponibles: lotesDisponibles || [],
-        lotes_usados: (lotesGuardados || []).map(l => ({ lote_id: l.lote_id, codigo_lote: l.codigo_lote, cantidad_usada: l.cantidad_usada, disponible: l.cantidad_usada }))
+        lotes_disponibles: lotesDisponibles,
+        lotes_usados: lotesGuardados.map(l => ({
+          lote_id: l.lote_id, codigo_lote: l.codigo_lote, cantidad_usada: l.cantidad_usada,
+          disponible: lotesDisponibles.find(d => d.id === l.lote_id)?.cantidad_actual ?? l.cantidad_usada
+        }))
       }
     }))
     setItems(itemsConLotes)
@@ -350,26 +448,22 @@ export default function Ventas() {
   }
 
   // ── Revertir efectos de una venta (stock, lotes, saldo cliente, ingreso) ──
+  // Usa las funciones SQL ajustar_lote / ajustar_stock (una petición cada una) y
+  // lanza error si algo falla, en vez de seguir como si nada.
   const revertirVenta = async (v, itemsVenta) => {
     for (const item of itemsVenta) {
-      const { data: prod } = await supabase.from('productos').select('stock_actual').eq('id', item.producto_id).single()
-      if (prod) {
-        await supabase.from('productos').update({ stock_actual: (prod.stock_actual || 0) + item.cantidad }).eq('id', item.producto_id)
-      }
       const { data: lotesItem } = await supabase.from('venta_item_lotes').select('*').eq('venta_item_id', item.id)
       for (const li of lotesItem || []) {
-        const { data: loteAct } = await supabase.from('lotes').select('cantidad_actual').eq('id', li.lote_id).single()
-        if (loteAct) await supabase.from('lotes').update({ cantidad_actual: loteAct.cantidad_actual + li.cantidad_usada }).eq('id', li.lote_id)
+        ok(await supabase.rpc('ajustar_lote', { p_lote: li.lote_id, p_delta: parseFloat(li.cantidad_usada) }))
       }
+      ok(await supabase.rpc('ajustar_stock', { p_producto: item.producto_id, p_delta: parseFloat(item.cantidad) }))
     }
     if (v.estado === 'credito') {
       const { data: cliente } = await supabase.from('clientes').select('saldo_pendiente').eq('id', v.cliente_id).single()
-      if (cliente) {
-        await supabase.from('clientes').update({ saldo_pendiente: Math.max(0, (cliente.saldo_pendiente || 0) - v.total) }).eq('id', v.cliente_id)
-      }
+      if (cliente) ok(await supabase.from('clientes').update({ saldo_pendiente: Math.max(0, (cliente.saldo_pendiente || 0) - v.total) }).eq('id', v.cliente_id))
     }
-    await supabase.from('ingresos').delete().eq('venta_id', v.id)
-    await supabase.from('venta_items').delete().eq('venta_id', v.id) // cascade elimina venta_item_lotes
+    ok(await supabase.from('ingresos').delete().eq('venta_id', v.id))
+    ok(await supabase.from('venta_items').delete().eq('venta_id', v.id)) // cascade elimina venta_item_lotes
   }
 
   // ── Guardar (crea o actualiza) ──
@@ -390,198 +484,253 @@ export default function Ventas() {
       }
     }
 
+    if (guardandoRef.current) return
+    guardandoRef.current = true
     setGuardando(true)
+
     const { subtotal, descuento, iva, total } = calcularTotales()
     const { comision_valor, vendedor_nombre, comision_porcentaje } = calcularVendedor()
     const cliente = clientes.find(c => c.id === venta.cliente_id)
     const estado = venta.tipo === 'remision' ? 'pendiente' : venta.estado
     const metodo_pago = (estado === 'credito' || venta.tipo === 'remision') ? null : venta.metodo_pago
-    const { data: { user } } = await supabase.auth.getUser()
 
-    let ventaId
-    let folio
+    let ventaId = null
+    let folio = ''
+    let fase = 'preparando'
+    const esNueva = !editandoId
 
-    if (editandoId) {
-      // Revertir lo anterior primero
-      await revertirVenta(ventaOriginal.venta, ventaOriginal.items)
-      folio = ventaOriginal.venta.folio
-      ventaId = editandoId
-
-      const { error } = await supabase.from('ventas').update({
-        tipo: venta.tipo,
-        estado,
-        cliente_id: venta.cliente_id,
-        cliente_nombre: cliente?.empresa || '',
-        metodo_pago,
-        tipo_cuenta: venta.tipo_cuenta || null,
-        vendedor: vendedor_nombre,
-        comision_porcentaje: comision_porcentaje || 0,
-        comision_valor,
-        subtotal, descuento, iva, total,
-        observaciones: venta.observaciones,
-        fecha_vencimiento: venta.fecha_vencimiento || null,
-        creado_en: venta.fecha ? new Date(venta.fecha + 'T12:00:00').toISOString() : ventaOriginal.venta.creado_en
-      }).eq('id', ventaId)
-
-      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
-
-      await supabase.from('auditoria').insert([{
-        tabla: 'ventas',
-        accion: 'EDICIÓN',
-        descripcion: `${folio} — ${cliente?.empresa} — Total nuevo: $${total.toLocaleString()} (Total anterior: $${ventaOriginal.venta.total?.toLocaleString()})`,
-        datos_anteriores: ventaOriginal.venta,
-        usuario_email: user?.email || 'desconocido',
-        fecha: new Date().toISOString()
-      }])
-    } else {
-      folio = await siguienteFolio(venta.tipo)
-      const { data, error } = await supabase.from('ventas').insert([{
-        folio, tipo: venta.tipo, estado,
-        cliente_id: venta.cliente_id, cliente_nombre: cliente?.empresa || '',
-        metodo_pago, tipo_cuenta: venta.tipo_cuenta || null,
-        vendedor: vendedor_nombre, comision_porcentaje: comision_porcentaje || 0, comision_valor,
-        subtotal, descuento, iva, total,
-        observaciones: venta.observaciones, fecha_vencimiento: venta.fecha_vencimiento || null,
-        usuario_email: user?.email,
-        creado_en: venta.fecha ? new Date(venta.fecha + 'T12:00:00').toISOString() : new Date().toISOString()
-      }]).select()
-
-      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
-      ventaId = data[0].id
-    }
-
-    // Guardar items, sus lotes, y descontar stock/lotes (aplica para crear y para editar)
-    for (const item of items) {
-      const { data: itemData, error: errItem } = await supabase.from('venta_items').insert([{
-        venta_id: ventaId,
-        producto_id: item.producto_id,
-        nombre_producto: item.nombre_producto,
-        codigo_producto: item.codigo_producto,
-        cantidad: parseFloat(item.cantidad),
-        unidad: item.unidad,
-        precio_unitario: parseFloat(item.precio_unitario),
-        subtotal: item.subtotal
-      }]).select()
-
-      if (errItem) { alert('Error al guardar item: ' + errItem.message); setGuardando(false); return }
-      const itemId = itemData[0].id
-
-      for (const lu of item.lotes_usados) {
-        const cantUsada = parseFloat(lu.cantidad_usada)
-
-        await supabase.from('venta_item_lotes').insert([{
-          venta_item_id: itemId, lote_id: lu.lote_id, codigo_lote: lu.codigo_lote,
-          cantidad_usada: cantUsada, unidad: item.unidad
-        }])
-
-        const { data: loteActual } = await supabase.from('lotes').select('cantidad_actual').eq('id', lu.lote_id).single()
-        if (loteActual) {
-          await supabase.from('lotes').update({ cantidad_actual: Math.max(0, loteActual.cantidad_actual - cantUsada) }).eq('id', lu.lote_id)
+    try {
+      // 1. Validación contra la base: lo que esta venta pide de CADA lote (sumando todos sus ítems)
+      const add = revertidoRef.current ? {} : addBackRef.current
+      const porLote = {}
+      for (const item of items) for (const lu of item.lotes_usados) {
+        porLote[lu.lote_id] = (porLote[lu.lote_id] || 0) + (parseFloat(lu.cantidad_usada) || 0)
+      }
+      const idsLotes = Object.keys(porLote)
+      if (idsLotes.length) {
+        const frescos = ok(await supabase.from('lotes').select('id, codigo_lote, cantidad_actual').in('id', idsLotes)) || []
+        for (const l of frescos) {
+          const real = (parseFloat(l.cantidad_actual) || 0) + (add[l.id] || 0)
+          if (porLote[l.id] > real + 0.0001) {
+            throw new Error(`El lote ${l.codigo_lote} no alcanza: esta venta usa ${porLote[l.id]} y hay ${real}.`)
+          }
         }
       }
 
-      const prod = productos.find(p => p.id === item.producto_id)
-      if (prod) {
-        const { data: prodActual } = await supabase.from('productos').select('stock_actual').eq('id', item.producto_id).single()
-        await supabase.from('productos').update({
-          stock_actual: (prodActual?.stock_actual || 0) - parseFloat(item.cantidad)
-        }).eq('id', item.producto_id)
+      const { data: { user } } = await supabase.auth.getUser()
+
+      // 2. Edición: revertir lo anterior (una sola vez, aunque se reintente el guardado)
+      if (editandoId && !revertidoRef.current) {
+        await revertirVenta(ventaOriginal.venta, ventaOriginal.items)
+        revertidoRef.current = true
+        addBackRef.current = {}
       }
-    }
 
-    if (venta.tipo === 'venta' && estado === 'contado') {
-      await supabase.from('ingresos').insert([{
-        venta_id: ventaId,
-        concepto: `Venta ${folio} — ${cliente?.empresa}`,
-        metodo_pago: venta.metodo_pago,
-        monto: total
-      }])
-    }
+      // 3. Encabezado
+      if (editandoId) {
+        folio = ventaOriginal.venta.folio
+        ventaId = editandoId
+        ok(await supabase.from('ventas').update({
+          tipo: venta.tipo,
+          estado,
+          cliente_id: venta.cliente_id,
+          cliente_nombre: cliente?.empresa || '',
+          metodo_pago,
+          tipo_cuenta: venta.tipo_cuenta || null,
+          vendedor: vendedor_nombre,
+          comision_porcentaje: comision_porcentaje || 0,
+          comision_valor,
+          subtotal, descuento, iva, total,
+          observaciones: venta.observaciones,
+          fecha_vencimiento: venta.fecha_vencimiento || null,
+          creado_en: timestampDeVenta(venta.fecha, ventaOriginal.venta.creado_en)
+        }).eq('id', ventaId))
+      } else {
+        folio = await siguienteFolio(venta.tipo)
+        const data = ok(await supabase.from('ventas').insert([{
+          folio, tipo: venta.tipo, estado,
+          cliente_id: venta.cliente_id, cliente_nombre: cliente?.empresa || '',
+          metodo_pago, tipo_cuenta: venta.tipo_cuenta || null,
+          vendedor: vendedor_nombre, comision_porcentaje: comision_porcentaje || 0, comision_valor,
+          subtotal, descuento, iva, total,
+          observaciones: venta.observaciones, fecha_vencimiento: venta.fecha_vencimiento || null,
+          usuario_email: user?.email,
+          creado_en: timestampDeVenta(venta.fecha, null)
+        }]).select())
+        ventaId = data[0].id
+      }
 
-    if (estado === 'credito') {
-      const { data: clienteActual } = await supabase.from('clientes').select('saldo_pendiente').eq('id', venta.cliente_id).single()
-      await supabase.from('clientes').update({
-        saldo_pendiente: (clienteActual?.saldo_pendiente || 0) + total
-      }).eq('id', venta.cliente_id)
-    }
+      // 4. Ítems y sus lotes (aún sin tocar el inventario)
+      const filasLotes = []
+      const consumoLote = {}
+      const consumoStock = {}
+      for (const item of items) {
+        const itemData = ok(await supabase.from('venta_items').insert([{
+          venta_id: ventaId,
+          producto_id: item.producto_id,
+          nombre_producto: item.nombre_producto,
+          codigo_producto: item.codigo_producto,
+          cantidad: parseFloat(item.cantidad),
+          unidad: item.unidad,
+          precio_unitario: parseFloat(item.precio_unitario),
+          subtotal: item.subtotal
+        }]).select())
+        const itemId = itemData[0].id
 
-    setMostrarForm(false)
-    setItems([])
-    setEditandoId(null)
-    setVentaOriginal(null)
-    setVenta({ tipo: 'venta', estado: 'contado', cliente_id: '', vendedor_id: '', metodo_pago: 'efectivo', tipo_cuenta: '', descuento: 0, iva: false, observaciones: '', fecha_vencimiento: '', fecha: fechaLocalHoy() })
-    setGuardando(false)
-    cargar()
-    cargarProductos()
+        for (const lu of item.lotes_usados) {
+          const cant = parseFloat(lu.cantidad_usada)
+          filasLotes.push({ venta_item_id: itemId, lote_id: lu.lote_id, codigo_lote: lu.codigo_lote, cantidad_usada: cant, unidad: item.unidad })
+          consumoLote[lu.lote_id] = (consumoLote[lu.lote_id] || 0) + cant
+        }
+        consumoStock[item.producto_id] = (consumoStock[item.producto_id] || 0) + parseFloat(item.cantidad)
+      }
+      if (filasLotes.length) ok(await supabase.from('venta_item_lotes').insert(filasLotes))
+
+      // 5. Inventario, ingreso y saldo del cliente
+      fase = 'inventario'
+      const res = await Promise.all([
+        ...Object.entries(consumoLote).map(([id, c]) => supabase.rpc('ajustar_lote', { p_lote: id, p_delta: -c })),
+        ...Object.entries(consumoStock).map(([id, c]) => supabase.rpc('ajustar_stock', { p_producto: id, p_delta: -c }))
+      ])
+      res.forEach(ok)
+
+      if (venta.tipo === 'venta' && estado === 'contado') {
+        ok(await supabase.from('ingresos').insert([{
+          venta_id: ventaId,
+          concepto: `Venta ${folio} — ${cliente?.empresa}`,
+          metodo_pago: venta.metodo_pago,
+          monto: total
+        }]))
+      }
+
+      if (estado === 'credito') {
+        const { data: clienteActual } = await supabase.from('clientes').select('saldo_pendiente').eq('id', venta.cliente_id).single()
+        ok(await supabase.from('clientes').update({
+          saldo_pendiente: (clienteActual?.saldo_pendiente || 0) + total
+        }).eq('id', venta.cliente_id))
+      }
+
+      if (editandoId) {
+        await supabase.from('auditoria').insert([{
+          tabla: 'ventas',
+          accion: 'EDICIÓN',
+          descripcion: `${folio} — ${cliente?.empresa} — Total nuevo: $${total.toLocaleString()} (Total anterior: $${ventaOriginal.venta.total?.toLocaleString()})`,
+          datos_anteriores: ventaOriginal.venta,
+          usuario_email: user?.email || 'desconocido',
+          fecha: new Date().toISOString()
+        }])
+      }
+
+      cerrarFormulario()
+      cargar()
+      cargarProductos()
+    } catch (e) {
+      let extra = ''
+      if (fase !== 'inventario' && ventaId && esNueva) {
+        // Aún no se tocó el inventario: se deshace lo creado
+        try {
+          ok(await supabase.from('venta_items').delete().eq('venta_id', ventaId))
+          ok(await supabase.from('ventas').delete().eq('id', ventaId))
+          extra = '\nSe deshizo lo que alcanzó a guardarse.'
+        } catch (e2) {
+          extra = `\nNo se pudo deshacer automáticamente (${e2.message}). Revisa ${folio}.`
+        }
+      } else if (fase === 'inventario') {
+        extra = '\nAlgunos movimientos (inventario, ingreso o saldo del cliente) pudieron aplicarse: revisa antes de reintentar.'
+      }
+      if (editandoId && revertidoRef.current) {
+        extra += `\n⚠️ ${folio} ya fue revertida del inventario: NO cierres este formulario; corrige y vuelve a guardar.`
+      }
+      alert(`Error al guardar${folio ? ' ' + folio : ''}: ${e.message}${extra}`)
+    } finally {
+      guardandoRef.current = false
+      setGuardando(false)
+    }
   }
+
   const facturarRemision = async () => {
-  const v = ventaAFacturar
-  const nuevoFolio = await siguienteFolio('venta')
-  const estado = datosFactura.estado
-  const metodo_pago = estado === 'credito' ? null : datosFactura.metodo_pago
-  const { data: { user } } = await supabase.auth.getUser()
-  const cliente = clientes.find(c => c.id === v.cliente_id)
+    const v = ventaAFacturar
+    try {
+      const nuevoFolio = await siguienteFolio('venta')
+      const estado = datosFactura.estado
+      const metodo_pago = estado === 'credito' ? null : datosFactura.metodo_pago
+      const { data: { user } } = await supabase.auth.getUser()
 
-  const { error } = await supabase.from('ventas').update({
-    folio: nuevoFolio,
-    tipo: 'venta',
-    estado,
-    metodo_pago,
-    tipo_cuenta: datosFactura.tipo_cuenta || null,
-    remision_origen: v.folio
-  }).eq('id', v.id)
+      ok(await supabase.from('ventas').update({
+        folio: nuevoFolio,
+        tipo: 'venta',
+        estado,
+        metodo_pago,
+        tipo_cuenta: datosFactura.tipo_cuenta || null,
+        remision_origen: v.folio
+      }).eq('id', v.id))
 
-  if (error) { alert('Error: ' + error.message); return }
+      if (estado === 'contado') {
+        ok(await supabase.from('ingresos').insert([{
+          venta_id: v.id,
+          concepto: `Factura ${nuevoFolio} (Remisión ${v.folio}) — ${v.cliente_nombre}`,
+          metodo_pago,
+          monto: v.total
+        }]))
+      }
 
-  if (estado === 'contado') {
-    await supabase.from('ingresos').insert([{
-      venta_id: v.id,
-      concepto: `Factura ${nuevoFolio} (Remisión ${v.folio}) — ${v.cliente_nombre}`,
-      metodo_pago,
-      monto: v.total
-    }])
-  }
+      if (estado === 'credito') {
+        const { data: clienteActual } = await supabase.from('clientes').select('saldo_pendiente').eq('id', v.cliente_id).single()
+        ok(await supabase.from('clientes').update({
+          saldo_pendiente: (clienteActual?.saldo_pendiente || 0) + v.total
+        }).eq('id', v.cliente_id))
+      }
 
-  if (estado === 'credito') {
-    const { data: clienteActual } = await supabase.from('clientes').select('saldo_pendiente').eq('id', v.cliente_id).single()
-    await supabase.from('clientes').update({
-      saldo_pendiente: (clienteActual?.saldo_pendiente || 0) + v.total
-    }).eq('id', v.cliente_id)
-  }
+      await supabase.from('auditoria').insert([{
+        tabla: 'ventas',
+        accion: 'FACTURACIÓN',
+        descripcion: `Remisión ${v.folio} convertida a Factura ${nuevoFolio} — ${v.cliente_nombre}`,
+        datos_anteriores: v,
+        usuario_email: user?.email || 'desconocido',
+        fecha: new Date().toISOString()
+      }])
 
-  await supabase.from('auditoria').insert([{
-    tabla: 'ventas',
-    accion: 'FACTURACIÓN',
-    descripcion: `Remisión ${v.folio} convertida a Factura ${nuevoFolio} — ${v.cliente_nombre}`,
-    datos_anteriores: v,
-    usuario_email: user?.email || 'desconocido',
-    fecha: new Date().toISOString()
-  }])
-
-  setVentaAFacturar(null)
-  setDatosFactura({ estado: 'contado', metodo_pago: 'efectivo', tipo_cuenta: '' })
-  cargar()
-}
-  // ── Eliminar con reversión ── 
-  const eliminarVenta = async () => {
-    const v = ventaAEliminar
-    const { data: itemsVenta } = await supabase.from('venta_items').select('*').eq('venta_id', v.id)
-    await revertirVenta(v, itemsVenta || [])
-    await supabase.from('ventas').delete().eq('id', v.id)
-
-    const { data: { user } } = await supabase.auth.getUser()
-    await supabase.from('auditoria').insert([{
-      tabla: 'ventas',
-      accion: 'ELIMINACIÓN',
-      descripcion: `${v.folio} — ${v.cliente_nombre} — Total: $${v.total?.toLocaleString()} (Stock y saldo revertidos)`,
-      datos_anteriores: v,
-      usuario_email: user?.email || 'desconocido',
-      fecha: new Date().toISOString()
-    }])
-
-    setVentaAEliminar(null)
+      setVentaAFacturar(null)
+      setDatosFactura({ estado: 'contado', metodo_pago: 'efectivo', tipo_cuenta: '' })
+    } catch (e) {
+      alert(`No se pudo facturar ${v.folio}: ${e.message}\nRevisa la remisión antes de reintentar.`)
+    }
     cargar()
-    cargarProductos()
+  }
+
+  // ── Eliminar con reversión ──
+  const eliminarVenta = async () => {
+    if (eliminandoRef.current) return // ignora el 2º clic
+    eliminandoRef.current = true
+    const v = ventaAEliminar
+    try {
+      // NUEVO: eliminar una venta a crédito borra también sus abonos; se pide confirmación
+      if (v.estado === 'credito') {
+        const abonos = await contarAbonos(v.id)
+        if (abonos > 0 && !window.confirm(`${v.folio} tiene ${abonos} abono(s) registrado(s).\nAl eliminarla también se borrarán esos cobros (dejarán de aparecer en Ingresos y en los saldos por cuenta).\n¿Eliminar de todas formas?`)) return
+      }
+
+      const { data: itemsVenta } = await supabase.from('venta_items').select('*').eq('venta_id', v.id)
+      await revertirVenta(v, itemsVenta || [])
+      ok(await supabase.from('ventas').delete().eq('id', v.id))
+
+      const { data: { user } } = await supabase.auth.getUser()
+      await supabase.from('auditoria').insert([{
+        tabla: 'ventas',
+        accion: 'ELIMINACIÓN',
+        descripcion: `${v.folio} — ${v.cliente_nombre} — Total: $${v.total?.toLocaleString()} (Stock y saldo revertidos)`,
+        datos_anteriores: v,
+        usuario_email: user?.email || 'desconocido',
+        fecha: new Date().toISOString()
+      }])
+    } catch (e) {
+      alert(`No se pudo eliminar ${v.folio}: ${e.message}\nRevisa la venta antes de reintentar.`)
+    } finally {
+      eliminandoRef.current = false
+      setVentaAEliminar(null)
+      cargar()
+      cargarProductos()
+    }
   }
 
   // ── Trazabilidad de despacho y transporte (uso interno, no va en la factura) ──
@@ -790,56 +939,56 @@ export default function Ventas() {
       )}
 
       {ventaAFacturar && (
-  <div onClick={() => setVentaAFacturar(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1001 }}>
-    <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 420, maxWidth: '95vw', boxShadow: '0 8px 28px rgba(0,0,0,0.15)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
-        <div style={{ width: 42, height: 42, background: '#E8F7EF', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>🧾</div>
-        <div>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Convertir a Factura</div>
-          <div style={{ fontSize: 12, color: '#9A8E85' }}>{ventaAFacturar.folio} — {ventaAFacturar.cliente_nombre}</div>
-          <div style={{ fontSize: 12, color: '#1A9156', fontWeight: 600 }}>Total: ${ventaAFacturar.total?.toLocaleString()}</div>
-        </div>
-      </div>
+        <div onClick={() => setVentaAFacturar(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1001 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 420, maxWidth: '95vw', boxShadow: '0 8px 28px rgba(0,0,0,0.15)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
+              <div style={{ width: 42, height: 42, background: '#E8F7EF', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>🧾</div>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>Convertir a Factura</div>
+                <div style={{ fontSize: 12, color: '#9A8E85' }}>{ventaAFacturar.folio} — {ventaAFacturar.cliente_nombre}</div>
+                <div style={{ fontSize: 12, color: '#1A9156', fontWeight: 600 }}>Total: ${ventaAFacturar.total?.toLocaleString()}</div>
+              </div>
+            </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div>
-          <label style={{ fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }}>ESTADO</label>
-          <select value={datosFactura.estado} onChange={e => setDatosFactura({...datosFactura, estado: e.target.value})} style={{ width: '100%', padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, background: '#F4F1ED' }}>
-            <option value="contado">Contado</option>
-            <option value="credito">Crédito</option>
-          </select>
-        </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div>
+                <label style={{ fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }}>ESTADO</label>
+                <select value={datosFactura.estado} onChange={e => setDatosFactura({...datosFactura, estado: e.target.value})} style={{ width: '100%', padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, background: '#F4F1ED' }}>
+                  <option value="contado">Contado</option>
+                  <option value="credito">Crédito</option>
+                </select>
+              </div>
 
-        {datosFactura.estado === 'contado' && (
-          <div>
-            <label style={{ fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }}>FORMA DE PAGO</label>
-            <select value={datosFactura.metodo_pago} onChange={e => setDatosFactura({...datosFactura, metodo_pago: e.target.value})} style={{ width: '100%', padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, background: '#F4F1ED' }}>
-              <option value="efectivo">Efectivo</option>
-              <option value="transferencia">Transferencia</option>
-            </select>
+              {datosFactura.estado === 'contado' && (
+                <div>
+                  <label style={{ fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }}>FORMA DE PAGO</label>
+                  <select value={datosFactura.metodo_pago} onChange={e => setDatosFactura({...datosFactura, metodo_pago: e.target.value})} style={{ width: '100%', padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, background: '#F4F1ED' }}>
+                    <option value="efectivo">Efectivo</option>
+                    <option value="transferencia">Transferencia</option>
+                  </select>
+                </div>
+              )}
+
+              {datosFactura.estado === 'contado' && datosFactura.metodo_pago === 'transferencia' && (
+                <div>
+                  <label style={{ fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }}>TIPO DE CUENTA</label>
+                  <select value={datosFactura.tipo_cuenta} onChange={e => setDatosFactura({...datosFactura, tipo_cuenta: e.target.value})} style={{ width: '100%', padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, background: '#F4F1ED' }}>
+                    <option value="">Selecciona...</option>
+                    <option value="1">1 — BANCOLOMBIA YOHE</option>
+                    <option value="2">2 — BANCOLOMBIA MANU</option>
+                    <option value="3">3 — NEQUI YOHE</option>
+                  </select>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 20 }}>
+              <button onClick={() => setVentaAFacturar(null)} style={{ padding: '8px 18px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
+              <button onClick={facturarRemision} style={{ padding: '8px 18px', background: '#1A9156', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>✅ Facturar</button>
+            </div>
           </div>
-        )}
-
-        {datosFactura.estado === 'contado' && datosFactura.metodo_pago === 'transferencia' && (
-          <div>
-            <label style={{ fontSize: 11, color: '#9A8E85', display: 'block', marginBottom: 4 }}>TIPO DE CUENTA</label>
-            <select value={datosFactura.tipo_cuenta} onChange={e => setDatosFactura({...datosFactura, tipo_cuenta: e.target.value})} style={{ width: '100%', padding: '8px 11px', border: '1px solid #DDD8CF', borderRadius: 7, fontSize: 13, background: '#F4F1ED' }}>
-              <option value="">Selecciona...</option>
-              <option value="1">1 — BANCOLOMBIA YOHE</option>
-              <option value="2">2 — BANCOLOMBIA MANU</option>
-              <option value="3">3 — NEQUI YOHE</option>
-            </select>
-          </div>
-        )}
-      </div>
-
-      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 20 }}>
-        <button onClick={() => setVentaAFacturar(null)} style={{ padding: '8px 18px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
-        <button onClick={facturarRemision} style={{ padding: '8px 18px', background: '#1A9156', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>✅ Facturar</button>
-      </div>
-    </div>
-  </div>
-)}
+        </div>
+      )}
 
       {/* Modal: trazabilidad de despacho y transporte (uso interno, no aparece en la factura) */}
       {ventaTrazabilidad && (
@@ -914,6 +1063,7 @@ export default function Ventas() {
           descripcion={`${ventaAEliminar.folio} — ${ventaAEliminar.cliente_nombre} — $${ventaAEliminar.total?.toLocaleString()}`}
           onConfirm={eliminarVenta}
           onCancel={() => setVentaAEliminar(null)}
+          registrarAuditoria={false}
         />
       )}
 
@@ -927,7 +1077,7 @@ export default function Ventas() {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 13, marginBottom: 16 }}>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CLIENTE</span><br/><b>{ventaDetalle.cliente_nombre}</b></div>
-              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>TIPO</span><br/>{ventaDetalle.tipo === 'remision' ? 'Remisión' : 'Venta'}</div>
+              <div><span style={{ color: '#9A8E85', fontSize: 11 }}>TIPO</span><br/>{esSaldoAnterior(ventaDetalle.folio) ? 'Saldo anterior' : ventaDetalle.tipo === 'remision' ? 'Remisión' : 'Venta'}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>ESTADO</span><br/>{badgeEstado(ventaDetalle)}</div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>FORMA DE PAGO</span><br/>{ventaDetalle.metodo_pago || '—'}</div>
               {ventaDetalle.tipo_cuenta && <div><span style={{ color: '#9A8E85', fontSize: 11 }}>CUENTA</span><br/>{cuentas[ventaDetalle.tipo_cuenta]}</div>}
@@ -1237,7 +1387,7 @@ export default function Ventas() {
           </div>
 
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-            <button onClick={() => { setMostrarForm(false); setItems([]); setEditandoId(null); setVentaOriginal(null) }} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
+            <button onClick={cancelarFormulario} style={{ padding: '8px 16px', border: '1px solid #DDD8CF', borderRadius: 7, background: 'none', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
             <button onClick={guardar} disabled={guardando} style={{ padding: '8px 16px', background: '#B22222', color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
               {guardando ? 'Guardando...' : editandoId ? '💾 Actualizar' : venta.tipo === 'remision' ? '📦 Crear Remisión' : '🧾 Crear Venta'}
             </button>
@@ -1265,14 +1415,19 @@ export default function Ventas() {
               </thead>
               <tbody>
                 {ventasFiltradas.map(v => {
+                  const anterior = esSaldoAnterior(v.folio)
                   return (
                     <tr key={v.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
                       <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222', whiteSpace: 'nowrap' }}>{v.folio}</td>
                       <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>{v.cliente_nombre}</td>
                       <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
-                        <span style={{ background: v.tipo === 'venta' ? '#E8F7EF' : '#FEF3DC', color: v.tipo === 'venta' ? '#1A9156' : '#C07D00', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
-                          {v.tipo === 'venta' ? 'Venta' : 'Remisión'}
-                        </span>
+                        {anterior ? (
+                          <span style={{ background: '#E8F0FB', color: '#1A5FA8', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>Saldo anterior</span>
+                        ) : (
+                          <span style={{ background: v.tipo === 'venta' ? '#E8F7EF' : '#FEF3DC', color: v.tipo === 'venta' ? '#1A9156' : '#C07D00', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>
+                            {v.tipo === 'venta' ? 'Venta' : 'Remisión'}
+                          </span>
+                        )}
                       </td>
                       <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
                         {badgeEstado(v)}
@@ -1288,23 +1443,27 @@ export default function Ventas() {
                           <button onClick={() => verDetalleVenta(v)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
                             👁️
                           </button>
-                          <button onClick={() => setVentaImprimir(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                            🖨️
-                          </button>
-                          <button onClick={() => abrirTrazabilidad(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                            🚚
-                          </button>
-                          <button onClick={() => solicitarEdicion(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-                            ✏️
-                          </button>
+                          {!anterior && (
+                            <>
+                              <button onClick={() => setVentaImprimir(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                                🖨️
+                              </button>
+                              <button onClick={() => abrirTrazabilidad(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                                🚚
+                              </button>
+                              <button onClick={() => solicitarEdicion(v)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                                ✏️
+                              </button>
+                            </>
+                          )}
                           <button onClick={() => setVentaAEliminar(v)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
                             🗑️
                           </button>
                           {v.tipo === 'remision' && v.estado === 'pendiente' && (
-    <button onClick={() => setVentaAFacturar(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
-      🧾
-    </button>
-  )}
+                            <button onClick={() => setVentaAFacturar(v)} style={{ background: '#E8F7EF', color: '#1A9156', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>
+                              🧾
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

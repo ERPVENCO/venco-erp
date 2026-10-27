@@ -1,8 +1,12 @@
-import { useState, useEffect, Fragment } from 'react'
+import { useState, useEffect, Fragment, useRef } from 'react'
 import { supabase } from './supabase'
 import ModalEliminar from './ModalEliminar'
 import ComprasPendientes from './ComprasPendientes'
 import { siguienteFolio, generarCodigoLote, trazAFila } from './recepcionUtils'
+
+// supabase-js NO lanza excepción cuando algo falla: devuelve { error }.
+// Con este helper los fallos dejan de pasar en silencio.
+const ok = (res) => { if (res.error) throw new Error(res.error.message); return res.data }
 
 // En PC deja la tabla intacta (sin scroll propio); en celular la envuelve
 // en un contenedor con scroll horizontal para poder llegar a "Acciones".
@@ -11,7 +15,14 @@ function TablaScroll({ isMobile, children }) {
   return <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>{children}</div>
 }
 
-const hoyISO = () => new Date().toISOString().split('T')[0]
+// Fecha de HOY en hora local (toISOString() da la fecha UTC: después de las 7 pm ya es "mañana")
+const hoyISO = () => {
+  const d = new Date()
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+}
+
+// NUEVO: las deudas anteriores al sistema se crean desde Cuentas por Pagar con folio ANT-xxxx
+const esSaldoAnterior = (folio) => String(folio || '').startsWith('ANT-')
 
 export default function Compras() {
   const [compras, setCompras] = useState([])
@@ -35,6 +46,9 @@ export default function Compras() {
   const [claveError, setClaveError] = useState('')
   // Detecta pantalla táctil — así una ventana de PC angosta no activa el scroll de tabla
   const [isMobile] = useState(() => window.matchMedia('(pointer: coarse)').matches)
+  // Evitan que un doble clic ejecute guardar / eliminar dos veces
+  const eliminandoRef = useRef(false)
+  const guardandoRef = useRef(false)
 
   const [compra, setCompra] = useState({
     proveedor_id: '', factura_proveedor: '',
@@ -134,22 +148,23 @@ export default function Compras() {
     setErrorMontos(''); return true
   }
 
+  // Revierte una compra completa. Cada item se deshace con revertirItem, que borra
+  // el LOTE primero: si una producción o venta ya lo usó, la base lo rechaza y no se toca nada más.
   const revertirCompra = async (c, itemsCompra) => {
-    for (const item of itemsCompra) {
-      const { data: prod } = await supabase.from('productos').select('stock_actual, costo_promedio').eq('id', item.producto_id).single()
-      if (prod) {
-        const nuevoStock = Math.max(0, (prod.stock_actual || 0) - item.cantidad)
-        await supabase.from('productos').update({ stock_actual: nuevoStock }).eq('id', item.producto_id)
-      }
-      await supabase.from('lotes').delete().eq('codigo_lote', item.codigo_lote)
-    }
+    for (const it of itemsCompra) await revertirItem(it)
+    ok(await supabase.from('egresos').delete().eq('compra_id', c.id))
+    ok(await supabase.from('trazabilidad_recepcion').delete().eq('compra_id', c.id))
     if (c.estado === 'credito') {
       const { data: prov } = await supabase.from('proveedores').select('saldo_pendiente').eq('id', c.proveedor_id).single()
-      if (prov) await supabase.from('proveedores').update({ saldo_pendiente: Math.max(0, (prov.saldo_pendiente || 0) - c.total) }).eq('id', c.proveedor_id)
+      if (prov) ok(await supabase.from('proveedores').update({ saldo_pendiente: Math.max(0, (prov.saldo_pendiente || 0) - c.total) }).eq('id', c.proveedor_id))
     }
-    await supabase.from('egresos').delete().eq('compra_id', c.id)
-    await supabase.from('compra_items').delete().eq('compra_id', c.id)
-    await supabase.from('trazabilidad_recepcion').delete().eq('compra_id', c.id)
+  }
+
+  // NUEVO: cuenta los abonos (egresos) registrados contra una compra a crédito
+  const contarAbonos = async (compraId) => {
+    const { count, error } = await supabase.from('egresos').select('id', { count: 'exact', head: true }).eq('compra_id', compraId)
+    if (error) throw new Error(error.message)
+    return count || 0
   }
 
   const solicitarEdicion = (c) => { setPidiendoClave(c); setClaveInput(''); setClaveError('') }
@@ -158,6 +173,28 @@ export default function Compras() {
     if (claveInput !== '1234') { setClaveError('Contraseña incorrecta'); return }
     const c = pidiendoClave
     setPidiendoClave(null)
+
+    // NUEVO: un saldo anterior no tiene productos; se gestiona desde Cuentas por Pagar
+    if (esSaldoAnterior(c.folio)) {
+      alert(`${c.folio} es un saldo anterior (deuda anterior al sistema) y no tiene productos.\nPara corregirlo, elimínalo y vuelve a crearlo desde Finanzas → Cuentas por Pagar → Saldo anterior.`)
+      return
+    }
+
+    // NUEVO: al editar se borran los egresos de la compra. Si es a crédito y ya tiene abonos,
+    // esos pagos se perderían y el saldo quedaría mal. Se bloquea la edición.
+    if (c.estado === 'credito') {
+      try {
+        const abonos = await contarAbonos(c.id)
+        if (abonos > 0) {
+          alert(`No se puede editar ${c.folio}: ya tiene ${abonos} abono(s) registrado(s).\nEditarla borraría esos pagos y descuadraría la caja.\nElimina primero los abonos (Finanzas → Cuentas por Pagar → Historial), edita la compra y vuelve a registrarlos.`)
+          return
+        }
+      } catch (e) {
+        alert('No se pudo verificar si la compra tiene abonos: ' + e.message)
+        return
+      }
+    }
+
     const { data: itemsC } = await supabase.from('compra_items').select('*').eq('compra_id', c.id)
 
     // Un item se bloquea solo si su lote ya fue usado (o no se encuentra el lote)
@@ -219,43 +256,45 @@ export default function Compras() {
   // Crea los egresos (contado) o suma el saldo del proveedor (crédito)
   const registrarPago = async (compraId, folio, proveedorNombre, total) => {
     if (compra.estado === 'contado') {
+      let filas = []
       if (compra.metodo_pago === 'efectivo') {
-        await supabase.from('egresos').insert([{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedorNombre}`, metodo_pago: 'efectivo', monto: total }])
+        filas = [{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedorNombre}`, metodo_pago: 'efectivo', monto: total }]
       } else if (compra.metodo_pago === 'transferencia') {
-        await supabase.from('egresos').insert([{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedorNombre}`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta1}`, monto: total }])
+        filas = [{ compra_id: compraId, concepto: `Compra ${folio} — ${proveedorNombre}`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta1}`, monto: total }]
       } else if (compra.metodo_pago === 'efectivo_transferencia') {
-        await supabase.from('egresos').insert([
+        filas = [
           { compra_id: compraId, concepto: `Compra ${folio} (efectivo)`, metodo_pago: 'efectivo', monto: parseFloat(compra.monto1) || 0 },
           { compra_id: compraId, concepto: `Compra ${folio} (transferencia)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta2}`, monto: parseFloat(compra.monto2) || 0 }
-        ])
+        ]
       } else if (compra.metodo_pago === 'transferencia_transferencia') {
-        await supabase.from('egresos').insert([
+        filas = [
           { compra_id: compraId, concepto: `Compra ${folio} (transf. 1)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta1}`, monto: parseFloat(compra.monto1) || 0 },
           { compra_id: compraId, concepto: `Compra ${folio} (transf. 2)`, metodo_pago: `transferencia cuenta ${compra.tipo_cuenta2}`, monto: parseFloat(compra.monto2) || 0 }
-        ])
+        ]
       }
+      if (filas.length) ok(await supabase.from('egresos').insert(filas))
     }
 
     if (compra.estado === 'credito') {
       const { data: provActual } = await supabase.from('proveedores').select('saldo_pendiente').eq('id', compra.proveedor_id).single()
-      await supabase.from('proveedores').update({ saldo_pendiente: (provActual?.saldo_pendiente || 0) + total }).eq('id', compra.proveedor_id)
+      ok(await supabase.from('proveedores').update({ saldo_pendiente: (provActual?.saldo_pendiente || 0) + total }).eq('id', compra.proveedor_id))
     }
-
   }
 
-  // Crea un item de compra completo: compra_item, stock, costo promedio, lote y trazabilidad
+  // Crea un item de compra completo: compra_item, stock, costo promedio, lote y trazabilidad.
+  // Devuelve un texto de aviso si solo falló la trazabilidad (la compra en sí queda bien).
   const crearItem = async (compraId, item, traz) => {
       const prod = materiasPrimas.find(p => p.id === item.producto_id)
       const codigo_lote = await generarCodigoLote(prod)
       const cantidadNueva = parseFloat(item.cantidad)
       const costoNuevo = parseFloat(item.costo_unitario)
 
-      const { data: itemData } = await supabase.from('compra_items').insert([{
+      const itemData = ok(await supabase.from('compra_items').insert([{
         compra_id: compraId, producto_id: item.producto_id,
         nombre_producto: item.nombre_producto, codigo_producto: item.codigo_producto,
         cantidad: cantidadNueva, unidad: item.unidad,
         costo_unitario: costoNuevo, subtotal: item.subtotal, codigo_lote
-      }]).select()
+      }]).select())
 
       const { data: prodActual } = await supabase.from('productos').select('stock_actual, costo_promedio, ultimo_costo').eq('id', item.producto_id).single()
       const stockActual = parseFloat(prodActual?.stock_actual) || 0
@@ -263,15 +302,16 @@ export default function Compras() {
       const nuevoStock = stockActual + cantidadNueva
       const costoPromedio = nuevoStock > 0 ? Math.round(((stockActual * costoActual) + (cantidadNueva * costoNuevo)) / nuevoStock) : costoNuevo
 
-      await supabase.from('productos').update({ stock_actual: nuevoStock, ultimo_costo: costoNuevo, costo_promedio: costoPromedio }).eq('id', item.producto_id)
+      ok(await supabase.from('productos').update({ stock_actual: nuevoStock, ultimo_costo: costoNuevo, costo_promedio: costoPromedio }).eq('id', item.producto_id))
 
-      await supabase.from('lotes').insert([{
+      ok(await supabase.from('lotes').insert([{
         producto_id: item.producto_id, codigo_lote,
         cantidad_inicial: cantidadNueva, cantidad_actual: cantidadNueva,
         fecha_ingreso: compra.fecha_compra || hoyISO(),
         fecha_vencimiento: traz.fecha_vencimiento || null
-      }])
+      }]))
 
+      let aviso = null
       if (prod?.categoria_mp !== 'empaques' && itemData?.[0]) {
         const { error: trazError } = await supabase.from('trazabilidad_recepcion').insert([{
           compra_id: compraId,
@@ -292,12 +332,18 @@ export default function Compras() {
           numero_unidades: traz.numero_unidades ? parseInt(traz.numero_unidades) : null,
           lote_proveedor: traz.lote_proveedor || null
         }])
-        if (trazError) console.log('TRAZ ERROR:', trazError)
+        if (trazError) {
+          console.error('TRAZ ERROR:', trazError)
+          aviso = `${item.nombre_producto}: la trazabilidad de recepción no se pudo guardar (${trazError.message})`
+        }
       }
+      return aviso
   }
 
-  // Deshace un item: stock, costo promedio, lote, trazabilidad y el propio compra_item
+  // Deshace un item: LOTE primero (si ya se usó, la base lo rechaza y no se toca nada más),
+  // luego stock y costo promedio, trazabilidad y el propio compra_item
   const revertirItem = async (it) => {
+    ok(await supabase.from('lotes').delete().eq('codigo_lote', it.codigo_lote).eq('producto_id', it.producto_id))
     const { data: p } = await supabase.from('productos').select('stock_actual, costo_promedio').eq('id', it.producto_id).single()
     if (p) {
       const stock = parseFloat(p.stock_actual) || 0
@@ -310,11 +356,10 @@ export default function Compras() {
         const valor = stock * prom - cant * costo
         if (valor > 0) upd.costo_promedio = Math.round(valor / nuevoStock)
       }
-      await supabase.from('productos').update(upd).eq('id', it.producto_id)
+      ok(await supabase.from('productos').update(upd).eq('id', it.producto_id))
     }
-    await supabase.from('lotes').delete().eq('codigo_lote', it.codigo_lote)
-    await supabase.from('trazabilidad_recepcion').delete().eq('compra_item_id', it.id)
-    await supabase.from('compra_items').delete().eq('id', it.id)
+    ok(await supabase.from('trazabilidad_recepcion').delete().eq('compra_item_id', it.id))
+    ok(await supabase.from('compra_items').delete().eq('id', it.id))
   }
 
   // Edición: conserva los items y lotes que no cambian. Solo toca los items modificados,
@@ -323,14 +368,15 @@ export default function Compras() {
     const orig = compraOriginal.compra
     const bloqueados = new Set(compraOriginal.bloqueados || [])
     const proveedor = proveedores.find(p => p.id === compra.proveedor_id)
+    const avisos = []
     try {
       const { data: { user } } = await supabase.auth.getUser()
 
       // 1. Deshacer el pago anterior
-      await supabase.from('egresos').delete().eq('compra_id', orig.id)
+      ok(await supabase.from('egresos').delete().eq('compra_id', orig.id))
       if (orig.estado === 'credito') {
         const { data: provOld } = await supabase.from('proveedores').select('saldo_pendiente').eq('id', orig.proveedor_id).single()
-        if (provOld) await supabase.from('proveedores').update({ saldo_pendiente: Math.max(0, (parseFloat(provOld.saldo_pendiente) || 0) - (parseFloat(orig.total) || 0)) }).eq('id', orig.proveedor_id)
+        if (provOld) ok(await supabase.from('proveedores').update({ saldo_pendiente: Math.max(0, (parseFloat(provOld.saldo_pendiente) || 0) - (parseFloat(orig.total) || 0)) }).eq('id', orig.proveedor_id))
       }
 
       // 2. Encabezado
@@ -357,7 +403,7 @@ export default function Compras() {
         const traz = trazabilidad[i] || trazVacio()
         const prod = materiasPrimas.find(p => p.id === item.producto_id)
 
-        if (!item.id) { await crearItem(orig.id, item, traz); continue }
+        if (!item.id) { const av = await crearItem(orig.id, item, traz); if (av) avisos.push(av); continue }
 
         const itOrig = compraOriginal.items.find(x => x.id === item.id)
         if (!itOrig) continue
@@ -366,7 +412,7 @@ export default function Compras() {
         // Cambió el producto: se deshace el item y se crea de nuevo con lote nuevo
         if (!bloqueado && itOrig.producto_id !== item.producto_id) {
           await revertirItem(itOrig)
-          await crearItem(orig.id, item, traz)
+          const av = await crearItem(orig.id, item, traz); if (av) avisos.push(av)
           continue
         }
 
@@ -375,10 +421,10 @@ export default function Compras() {
         const cantNueva = bloqueado ? cantVieja : parseFloat(item.cantidad)
         const costoNuevo = parseFloat(item.costo_unitario)
 
-        await supabase.from('compra_items').update({
+        ok(await supabase.from('compra_items').update({
           cantidad: cantNueva, unidad: bloqueado ? itOrig.unidad : item.unidad,
           costo_unitario: costoNuevo, subtotal: cantNueva * costoNuevo
-        }).eq('id', item.id)
+        }).eq('id', item.id))
 
         // Ajuste de stock y costo promedio si cambió la cantidad o el costo
         if (cantNueva !== cantVieja || costoNuevo !== costoViejo) {
@@ -393,24 +439,24 @@ export default function Compras() {
           }
           const upd = { stock_actual: nuevoStock, costo_promedio: nuevoProm }
           if (parseFloat(p?.ultimo_costo) === costoViejo) upd.ultimo_costo = costoNuevo
-          await supabase.from('productos').update(upd).eq('id', item.producto_id)
+          ok(await supabase.from('productos').update(upd).eq('id', item.producto_id))
         }
 
         // Lote: vencimiento siempre; cantidades solo si el lote no se había usado
         const loteUpd = { fecha_vencimiento: traz.fecha_vencimiento || null }
         if (!bloqueado && cantNueva !== cantVieja) { loteUpd.cantidad_inicial = cantNueva; loteUpd.cantidad_actual = cantNueva }
-        await supabase.from('lotes').update(loteUpd).eq('codigo_lote', item.codigo_lote)
+        ok(await supabase.from('lotes').update(loteUpd).eq('codigo_lote', item.codigo_lote).eq('producto_id', item.producto_id))
 
         // Trazabilidad
         if (prod?.categoria_mp !== 'empaques') {
           const { data: existente } = await supabase.from('trazabilidad_recepcion').select('id').eq('compra_item_id', item.id).maybeSingle()
           if (existente) {
-            await supabase.from('trazabilidad_recepcion').update(trazAFila(traz)).eq('id', existente.id)
+            ok(await supabase.from('trazabilidad_recepcion').update(trazAFila(traz)).eq('id', existente.id))
           } else {
-            await supabase.from('trazabilidad_recepcion').insert([{
+            ok(await supabase.from('trazabilidad_recepcion').insert([{
               compra_id: orig.id, compra_item_id: item.id, producto_id: item.producto_id,
               nombre_producto: item.nombre_producto, ...trazAFila(traz)
-            }])
+            }]))
           }
         }
       }
@@ -425,9 +471,11 @@ export default function Compras() {
       }])
 
       cerrarForm(); cargar(); cargarMaterias()
+      if (avisos.length) alert('La compra se guardó, pero:\n' + avisos.join('\n'))
     } catch (e) {
       alert('Error al guardar la edición: ' + e.message + '\nRevisa la compra ' + orig.folio + ' antes de reintentar.')
     }
+    guardandoRef.current = false
     setGuardando(false)
   }
 
@@ -439,19 +487,20 @@ export default function Compras() {
     const { subtotal, descuento, total } = calcularTotales()
     if (!validarMontos(total)) return
 
+    if (guardandoRef.current) return
+    guardandoRef.current = true
     setGuardando(true)
     if (editandoId) { await guardarEdicion(subtotal, descuento, total); return }
-    const proveedor = proveedores.find(p => p.id === compra.proveedor_id)
-    const { data: { user } } = await supabase.auth.getUser()
-    let compraId, folio
 
-    if (!editandoId) {
-      try {
-        folio = await siguienteFolio()
-      } catch (e) {
-        alert(e.message); setGuardando(false); return
-      }
-      const { data, error } = await supabase.from('compras').insert([{
+    let compraId = null
+    let folio = ''
+    const avisos = []
+    try {
+      const proveedor = proveedores.find(p => p.id === compra.proveedor_id)
+      const { data: { user } } = await supabase.auth.getUser()
+
+      folio = await siguienteFolio()
+      const data = ok(await supabase.from('compras').insert([{
         folio, proveedor_id: compra.proveedor_id, proveedor_nombre: proveedor?.empresa || '',
         factura_proveedor: compra.factura_proveedor || null,
         fecha_compra: compra.fecha_compra || hoyISO(),
@@ -459,32 +508,68 @@ export default function Compras() {
         tipo_cuenta1: compra.tipo_cuenta1 || null, monto1: parseFloat(compra.monto1) || 0,
         tipo_cuenta2: compra.tipo_cuenta2 || null, monto2: parseFloat(compra.monto2) || 0,
         subtotal, descuento, total, observaciones: compra.observaciones, usuario_email: user?.email
-      }]).select()
-      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
+      }]).select())
       compraId = data[0].id
+
+      for (let i = 0; i < items.length; i++) {
+        const av = await crearItem(compraId, items[i], trazabilidad[i])
+        if (av) avisos.push(av)
+      }
+
+      await registrarPago(compraId, folio, proveedor?.empresa, total)
+
+      cerrarForm(); cargar(); cargarMaterias()
+      if (avisos.length) alert(`La compra ${folio} se guardó, pero:\n` + avisos.join('\n'))
+    } catch (e) {
+      alert(`Error al guardar ${folio || 'la compra'}: ${e.message}\n` + (compraId
+        ? `La compra ${folio} puede haber quedado a medias: ábrela y revisa sus productos, lotes y pago antes de reintentar.`
+        : 'No se guardó nada.'))
+      if (compraId) { cargar(); cargarMaterias() }
+    } finally {
+      guardandoRef.current = false
+      setGuardando(false)
     }
-
-    for (let i = 0; i < items.length; i++) {
-      await crearItem(compraId, items[i], trazabilidad[i])
-    }
-
-    await registrarPago(compraId, folio, proveedor?.empresa, total)
-
-    cerrarForm(); setGuardando(false); cargar(); cargarMaterias()
   }
 
   const eliminarCompra = async () => {
+    if (eliminandoRef.current) return // ignora el 2º clic
+    eliminandoRef.current = true
     const c = compraAEliminar
-    const { data: itemsC } = await supabase.from('compra_items').select('*').eq('compra_id', c.id)
-    await revertirCompra(c, itemsC || [])
-    await supabase.from('compras').delete().eq('id', c.id)
-    const { data: { user } } = await supabase.auth.getUser()
-    await supabase.from('auditoria').insert([{
-      tabla: 'compras', accion: 'ELIMINACIÓN',
-      descripcion: `${c.folio} — ${c.proveedor_nombre} — $${c.total?.toLocaleString()} (Stock y saldo revertidos)`,
-      datos_anteriores: c, usuario_email: user?.email || 'desconocido', fecha: new Date().toISOString()
-    }])
-    setCompraAEliminar(null); cargar(); cargarMaterias()
+    try {
+      // NUEVO: eliminar una compra a crédito borra también sus abonos; se pide confirmación
+      if (c.estado === 'credito') {
+        const abonos = await contarAbonos(c.id)
+        if (abonos > 0 && !window.confirm(`${c.folio} tiene ${abonos} abono(s) registrado(s).\nAl eliminarla también se borrarán esos pagos (dejarán de aparecer en Egresos y en los saldos por cuenta).\n¿Eliminar de todas formas?`)) return
+      }
+
+      const { data: itemsC } = await supabase.from('compra_items').select('*').eq('compra_id', c.id)
+
+      // Si ya se consumió material de algún lote, primero hay que eliminar lo que lo consumió
+      const codigos = (itemsC || []).map(i => i.codigo_lote).filter(Boolean)
+      if (codigos.length) {
+        const { data: lotesC } = await supabase.from('lotes').select('codigo_lote, cantidad_inicial, cantidad_actual').in('codigo_lote', codigos)
+        const usados = (lotesC || []).filter(l => parseFloat(l.cantidad_actual) < parseFloat(l.cantidad_inicial))
+        if (usados.length) {
+          alert(`No se puede eliminar ${c.folio}: ya se consumió material de ${usados.map(l => l.codigo_lote).join(', ')}.\nElimina primero la producción o venta que lo usó.`)
+          return
+        }
+      }
+
+      await revertirCompra(c, itemsC || [])
+      ok(await supabase.from('compras').delete().eq('id', c.id))
+
+      const { data: { user } } = await supabase.auth.getUser()
+      await supabase.from('auditoria').insert([{
+        tabla: 'compras', accion: 'ELIMINACIÓN',
+        descripcion: `${c.folio} — ${c.proveedor_nombre} — $${c.total?.toLocaleString()} (Stock y saldo revertidos)`,
+        datos_anteriores: c, usuario_email: user?.email || 'desconocido', fecha: new Date().toISOString()
+      }])
+    } catch (e) {
+      alert(`No se pudo eliminar ${c.folio}: ${e.message}\nRevisa la compra antes de reintentar.`)
+    } finally {
+      eliminandoRef.current = false
+      setCompraAEliminar(null); cargar(); cargarMaterias()
+    }
   }
 
   const verDetalle = async (c) => {
@@ -540,7 +625,7 @@ export default function Compras() {
       {compraAEliminar && (
         <ModalEliminar item={compraAEliminar} tabla="compras"
           descripcion={`${compraAEliminar.folio} — ${compraAEliminar.proveedor_nombre} — $${compraAEliminar.total?.toLocaleString()}`}
-          onConfirm={eliminarCompra} onCancel={() => setCompraAEliminar(null)} />
+          onConfirm={eliminarCompra} onCancel={() => setCompraAEliminar(null)} registrarAuditoria={false} />
       )}
 
       {/* Modal detalle */}
@@ -901,7 +986,12 @@ export default function Compras() {
               <tbody>
                 {compras.map(c => (
                   <tr key={c.id} style={{ borderBottom: '1px solid #DDD8CF' }}>
-                    <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222', whiteSpace: 'nowrap' }}>{c.folio}</td>
+                    <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#B22222', whiteSpace: 'nowrap' }}>
+                      {c.folio}
+                      {esSaldoAnterior(c.folio) && (
+                        <span style={{ marginLeft: 6, background: '#E8F0FB', color: '#1A5FA8', padding: '1px 6px', borderRadius: 10, fontSize: 10, fontWeight: 600, fontFamily: 'sans-serif' }}>Saldo anterior</span>
+                      )}
+                    </td>
                     <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>{c.proveedor_nombre}</td>
                     <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
                       {badgeEstado(c)}
@@ -914,7 +1004,9 @@ export default function Compras() {
                     <td style={{ padding: '8px 16px' }}>
                       <div style={{ display: 'flex', gap: 6 }}>
                         <button onClick={() => verDetalle(c)} style={{ background: '#E8F0FB', color: '#1A5FA8', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>👁️</button>
-                        <button onClick={() => solicitarEdicion(c)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>✏️</button>
+                        {!esSaldoAnterior(c.folio) && (
+                          <button onClick={() => solicitarEdicion(c)} style={{ background: '#FEF3DC', color: '#C07D00', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>✏️</button>
+                        )}
                         <button onClick={() => setCompraAEliminar(c)} style={{ background: '#FCEAEA', color: '#B22222', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}>🗑️</button>
                       </div>
                     </td>
