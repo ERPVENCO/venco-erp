@@ -98,6 +98,48 @@ const recalcularBatch = async (batchId) => {
   if (error) alert('El cambio se guardó, pero no se pudo recalcular el costo del batch: ' + error.message)
 }
 
+// REPARTO_INICIO
+// Reparte FIFO los lotes entre TODOS los productos de la orden, en orden, contando lo que ya tomaron los anteriores.
+// - Lo que el usuario cambió a mano (ing.manual) o la receta libre se respeta y se reserva primero.
+// - Lo automático se recalcula: si el lote 1 se acaba, el siguiente producto (o el mismo) pasa al lote 2.
+const repartirLotesFIFO = (cajas) => {
+  const reservado = {} // lote_id -> cantidad ya comprometida en esta orden
+  const sumar = (id, v) => { reservado[id] = (reservado[id] || 0) + v }
+
+  for (const c of cajas) for (const p of c.productos) for (const ing of p.ingredientes) {
+    if (p.receta_tipo === 'libre' || ing.manual) {
+      for (const lu of ing.lotes_usados) if (lu.lote_id) sumar(lu.lote_id, parseFloat(lu.cantidad_usada) || 0)
+    }
+  }
+
+  return cajas.map(c => ({
+    ...c,
+    productos: c.productos.map(p => {
+      if (p.receta_tipo === 'libre') return p
+      return {
+        ...p,
+        ingredientes: p.ingredientes.map(ing => {
+          if (ing.manual) return ing
+          let resto = parseFloat(ing.cantidad_requerida) || 0
+          const usados = []
+          for (const l of ing.lotes_disponibles || []) {
+            if (resto <= 0.00001) break
+            const total = parseFloat(l.cantidad_actual) || 0
+            const libre = total - (reservado[l.id] || 0)
+            if (libre <= 0.00001) continue
+            const usar = Math.min(libre, resto)
+            usados.push({ lote_id: l.id, codigo_lote: l.codigo_lote, cantidad_usada: parseFloat(usar.toFixed(4)), disponible: total })
+            sumar(l.id, usar)
+            resto -= usar
+          }
+          return { ...ing, lotes_usados: usados }
+        })
+      }
+    })
+  }))
+}
+// REPARTO_FIN
+
 // ── Permisos ──
 // ÚNICO punto donde se decide qué puede hacer cada usuario. Los módulos preguntan por
 // permisos (ej. puede('formulaciones.ver')), nunca por roles.
@@ -107,7 +149,7 @@ const recalcularBatch = async (batchId) => {
 // ▶ PRUEBA: pon SIMULAR_OPERARIO en true para ver la pantalla como la vería un operario
 //   (sin Formulaciones, sin costos, sin ingredientes, sin eliminar; solo mezcla + nº de baches
 //   y siempre con bolsas). Déjalo en false para el uso normal.
-const SIMULAR_OPERARIO = false
+const SIMULAR_OPERARIO = true
 
 function usePermisos() {
   const puede = (_permiso) => !SIMULAR_OPERARIO
@@ -1250,7 +1292,7 @@ function Produccion({ puede, onVolver }) {
   })
 
   const agregarCaja = () => setCajas([...cajas, cajaVacia()])
-  const eliminarCaja = (cajaIdx) => setCajas(cajas.filter((_, i) => i !== cajaIdx))
+  const eliminarCaja = (cajaIdx) => setCajas(repartirLotesFIFO(cajas.filter((_, i) => i !== cajaIdx)))
 
   const agregarProductoACaja = (cajaIdx) => {
     const updated = [...cajas]
@@ -1260,7 +1302,7 @@ function Produccion({ puede, onVolver }) {
   const eliminarProductoDeCaja = (cajaIdx, prodIdx) => {
     const updated = [...cajas]
     updated[cajaIdx].productos = updated[cajaIdx].productos.filter((_, i) => i !== prodIdx)
-    setCajas(updated)
+    setCajas(repartirLotesFIFO(updated))
   }
 
   const actualizarCaja = (cajaIdx, campo, valor) => {
@@ -1325,7 +1367,7 @@ function Produccion({ puede, onVolver }) {
       productosCaja[prodIdx] = { ...pVigente, ingredientes }
       cajaCopy.productos = productosCaja
       updated[cajaIdx] = cajaCopy
-      return updated
+      return repartirLotesFIFO(updated)
     })
   }
 
@@ -1337,19 +1379,23 @@ function Produccion({ puede, onVolver }) {
       const lote = ing.lotes_disponibles.find(l => l.id === valor)
       if (lote) { ing.lotes_usados[loteIdx].codigo_lote = lote.codigo_lote; ing.lotes_usados[loteIdx].disponible = lote.cantidad_actual }
     }
-    setCajas(updated)
+    ing.manual = true // lo escogió el usuario: el reparto automático ya no lo mueve
+    setCajas(repartirLotesFIFO(updated))
   }
 
   const agregarLoteIngrediente = (cajaIdx, prodIdx, ingIdx) => {
     const updated = [...cajas]
-    updated[cajaIdx].productos[prodIdx].ingredientes[ingIdx].lotes_usados.push({ lote_id: '', codigo_lote: '', cantidad_usada: '', disponible: 0 })
-    setCajas(updated)
+    const ing = updated[cajaIdx].productos[prodIdx].ingredientes[ingIdx]
+    ing.lotes_usados.push({ lote_id: '', codigo_lote: '', cantidad_usada: '', disponible: 0 })
+    ing.manual = true
+    setCajas(repartirLotesFIFO(updated))
   }
   const eliminarLoteIngrediente = (cajaIdx, prodIdx, ingIdx, loteIdx) => {
     const updated = [...cajas]
     const ing = updated[cajaIdx].productos[prodIdx].ingredientes[ingIdx]
     ing.lotes_usados = ing.lotes_usados.filter((_, i) => i !== loteIdx)
-    setCajas(updated)
+    ing.manual = true
+    setCajas(repartirLotesFIFO(updated))
   }
 
   // ── Receta libre: agregar/editar/quitar materias primas a mano ──
@@ -1619,7 +1665,7 @@ function Produccion({ puede, onVolver }) {
               tipo_inventario: cat?.tipo_inventario || 'materia_prima', categoria_mp: cat?.categoria_mp || 'materia_prima',
               unidad_receta: rs[0].unidad, cantidad_receta: null,
               cantidad_requerida: parseFloat(total.toFixed(4)), stock_actual: cat?.stock_actual || 0,
-              lotes_disponibles: disp,
+              lotes_disponibles: disp, manual: true,
               lotes_usados: rs.map(r => ({
                 lote_id: r.lote_id, codigo_lote: r.codigo_lote, cantidad_usada: parseFloat(r.cantidad_usada),
                 disponible: disp.find(l => l.id === r.lote_id)?.cantidad_actual ?? parseFloat(r.cantidad_usada)
