@@ -149,7 +149,7 @@ const repartirLotesFIFO = (cajas) => {
 // ▶ PRUEBA: pon SIMULAR_OPERARIO en true para ver la pantalla como la vería un operario
 //   (sin Formulaciones, sin costos, sin ingredientes, sin eliminar; solo mezcla + nº de baches
 //   y siempre con bolsas). Déjalo en false para el uso normal.
-const SIMULAR_OPERARIO = true
+const SIMULAR_OPERARIO = false
 
 function usePermisos() {
   const puede = (_permiso) => !SIMULAR_OPERARIO
