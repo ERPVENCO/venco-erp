@@ -1554,17 +1554,18 @@ function Produccion({ puede, onVolver }) {
 
   // ── Datos de una producción (para revertir o editar) ──
   const cargarDatosProduccion = async (p) => {
-    const [r1, r2, r3] = await Promise.all([
+    const [r1, r2, r3, r4] = await Promise.all([
       supabase.from('produccion_items').select('*').eq('produccion_id', p.id),
       supabase.from('produccion_grupos').select('*').eq('produccion_id', p.id),
-      supabase.from('produccion_subproductos').select('*').eq('produccion_id', p.id)
+      supabase.from('produccion_subproductos').select('*').eq('produccion_id', p.id),
+      supabase.from('produccion_descuentos_mp').select('*').eq('produccion_id', p.id)
     ])
-    const items = ok(r1) || [], grupos = ok(r2) || [], extras = ok(r3) || []
+    const items = ok(r1) || [], grupos = ok(r2) || [], extras = ok(r3) || [], descuentos = ok(r4) || []
     const itemIds = items.map(i => i.id)
     const lotesMP = itemIds.length
       ? (ok(await supabase.from('produccion_lotes_mp').select('*').in('produccion_item_id', itemIds)) || [])
       : []
-    return { items, grupos, extras, lotesMP }
+    return { items, grupos, extras, lotesMP, descuentos }
   }
 
   // Los lotes que esta producción creó (producto terminado y subproductos) deben estar intactos
@@ -1597,10 +1598,17 @@ function Produccion({ puede, onVolver }) {
     const datos = await cargarDatosProduccion(p)
     const lotesGen = await validarGeneradosIntactos(datos)
 
-    const res = await Promise.all(datos.lotesMP.flatMap(l => [
-      supabase.rpc('ajustar_lote', { p_lote: l.lote_id, p_delta: parseFloat(l.cantidad_usada) }),
-      supabase.rpc('ajustar_stock', { p_producto: l.insumo_id, p_delta: parseFloat(l.cantidad_usada) })
-    ]))
+    const res = await Promise.all([
+      ...datos.lotesMP.flatMap(l => [
+        supabase.rpc('ajustar_lote', { p_lote: l.lote_id, p_delta: parseFloat(l.cantidad_usada) }),
+        supabase.rpc('ajustar_stock', { p_producto: l.insumo_id, p_delta: parseFloat(l.cantidad_usada) })
+      ]),
+      // Lo que se descontó de la materia prima por subproducto / recorte / sobrante / merma
+      ...datos.descuentos.flatMap(d => [
+        ...(d.lote_id ? [supabase.rpc('ajustar_lote', { p_lote: d.lote_id, p_delta: parseFloat(d.cantidad) })] : []),
+        supabase.rpc('ajustar_stock', { p_producto: d.insumo_id, p_delta: parseFloat(d.cantidad) })
+      ])
+    ])
     res.forEach(ok)
 
     for (const l of lotesGen) {
@@ -1612,6 +1620,7 @@ function Produccion({ puede, onVolver }) {
       if (b) ok(await supabase.from('batches').update({ stock_actual: (parseFloat(b.stock_actual) || 0) + parseFloat(p.cantidad_batch) }).eq('id', p.batch_id))
     }
     ok(await supabase.from('produccion_subproductos').delete().eq('produccion_id', p.id))
+    ok(await supabase.from('produccion_descuentos_mp').delete().eq('produccion_id', p.id))
     ok(await supabase.from('producciones').delete().eq('id', p.id))
     await recalcularBatch(p.batch_id) // si el batch ya estaba cerrado, se reparte de nuevo con lo que queda
   }
@@ -1776,6 +1785,59 @@ function Produccion({ puede, onVolver }) {
         }
       }
 
+      // Materia prima procesada que NO es producto (subproducto + recorte + sobrante + merma): también se descuenta.
+      // Sale de la(s) materia(s) prima(s) que usan los productos de la caja (si son varias, en proporción a su consumo)
+      // y de sus lotes más antiguos, después de lo que ya consumen los productos de esta orden.
+      const n4 = (v) => parseFloat(v) || 0
+      const descuentosPorCaja = []
+      for (let ci = 0; ci < cajas.length; ci++) {
+        const caja = cajas[ci]
+        const extraTotal = parseFloat((
+          (caja.tiene_subproducto ? n4(caja.cantidad_subproducto) : 0) +
+          (caja.tiene_recorte ? n4(caja.cantidad_recorte) : 0) +
+          (caja.tiene_sobrante ? n4(caja.cantidad_sobrante) : 0) +
+          n4(caja.merma)
+        ).toFixed(4))
+        descuentosPorCaja[ci] = []
+        if (extraTotal <= 0.00001) continue
+
+        const mps = {}
+        for (const p of caja.productos) for (const ing of p.ingredientes) {
+          if (esEmpaqueOInsumo(ing.categoria_mp) || !ing.materia_prima_id) continue
+          if (!mps[ing.materia_prima_id]) mps[ing.materia_prima_id] = { id: ing.materia_prima_id, nombre: ing.nombre, unidad: ing.unidad_receta, consumo: 0 }
+          mps[ing.materia_prima_id].consumo += n4(ing.cantidad_requerida)
+        }
+        const lista = Object.values(mps)
+        const consumoTotal = lista.reduce((t, m) => t + m.consumo, 0)
+        if (lista.length === 0 || consumoTotal <= 0) {
+          throw new Error(`En la materia prima procesada #${ci + 1} hay recorte/sobrante/merma pero ninguno de sus productos consume materia prima, así que no hay de dónde descontarlo.`)
+        }
+
+        let asignadoMP = 0
+        for (let mi = 0; mi < lista.length; mi++) {
+          const m = lista[mi]
+          const parte = mi === lista.length - 1
+            ? parseFloat((extraTotal - asignadoMP).toFixed(4))
+            : parseFloat((extraTotal * (m.consumo / consumoTotal)).toFixed(4))
+          asignadoMP += parte
+          if (parte <= 0.00001) continue
+
+          const lotesMP = await fetchLotesDisponibles(m.id, add)
+          const libres = lotesMP
+            .map(l => ({ ...l, cantidad_actual: (parseFloat(l.cantidad_actual) || 0) - (porLote[l.id] || 0) }))
+            .filter(l => l.cantidad_actual > 0.00001)
+          const asignados = asignarFIFO(libres, parte)
+          const cubierto = asignados.reduce((t, a) => t + a.cantidad_usada, 0)
+          if (cubierto < parte - 0.001) {
+            throw new Error(`No alcanza ${m.nombre} para descontar el recorte/sobrante/merma de la materia prima procesada #${ci + 1}: se necesitan ${fmtNum(parte)} ${m.unidad} más y solo quedan ${fmtNum(cubierto)} en lotes (después de lo que usan los productos).`)
+          }
+          for (const a of asignados) {
+            porLote[a.lote_id] = (porLote[a.lote_id] || 0) + a.cantidad_usada
+            descuentosPorCaja[ci].push({ insumo_id: m.id, nombre_insumo: m.nombre, lote_id: a.lote_id, codigo_lote: a.codigo_lote, cantidad: a.cantidad_usada, unidad: m.unidad })
+          }
+        }
+      }
+
       // Edición: revertir lo anterior (una sola vez, aunque se reintente el guardado)
       if (editando && !yaRevertidoRef.current) {
         await revertirProduccion(editando.prod)
@@ -1808,7 +1870,7 @@ function Produccion({ puede, onVolver }) {
 
       // Se acumula todo y se escribe al final en bloque (antes eran ~50 peticiones seguidas)
       const consumoLote = {}, consumoStock = {}, ingresoStock = {}
-      const filasLotesMP = [], lotesNuevos = [], filasExtras = []
+      const filasLotesMP = [], lotesNuevos = [], filasExtras = [], filasDescuentos = []
       const usadosCodigos = new Set()
       const suma = (obj, k, v) => { obj[k] = (obj[k] || 0) + v }
 
@@ -1832,6 +1894,13 @@ function Produccion({ puede, onVolver }) {
           merma: parseFloat(caja.merma) || 0
         }]).select())
         const grupoId = grupoData[0].id
+
+        // Subproducto / recorte / sobrante / merma: se descuentan de la materia prima procesada
+        for (const d of descuentosPorCaja[cajas.indexOf(caja)] || []) {
+          filasDescuentos.push({ produccion_id: produccionId, grupo_id: grupoId, ...d, motivo: 'subproducto/recorte/sobrante/merma' })
+          suma(consumoLote, d.lote_id, d.cantidad)
+          suma(consumoStock, d.insumo_id, d.cantidad)
+        }
 
         for (const p of caja.productos) {
           // Código de lote del producto terminado: el que escribió el usuario o uno automático que no se repite
@@ -1884,6 +1953,7 @@ function Produccion({ puede, onVolver }) {
         creados.forEach(l => lotesCreadosIds.push(l.id))
       }
       if (filasExtras.length) ok(await supabase.from('produccion_subproductos').insert(filasExtras))
+      if (filasDescuentos.length) ok(await supabase.from('produccion_descuentos_mp').insert(filasDescuentos))
 
       fase = 'inventario'
       const res = await Promise.all([
@@ -1917,6 +1987,7 @@ function Produccion({ puede, onVolver }) {
         try {
           if (lotesCreadosIds.length) ok(await supabase.from('lotes').delete().in('id', lotesCreadosIds))
           ok(await supabase.from('produccion_subproductos').delete().eq('produccion_id', produccionId))
+          ok(await supabase.from('produccion_descuentos_mp').delete().eq('produccion_id', produccionId))
           ok(await supabase.from('producciones').delete().eq('id', produccionId))
           extra = '\nSe deshizo lo que alcanzó a guardarse.'
         } catch (e2) {
@@ -1937,6 +2008,7 @@ function Produccion({ puede, onVolver }) {
 
   const verDetalle = async (prod) => {
     const { data: grupos } = await supabase.from('produccion_grupos').select('*').eq('produccion_id', prod.id)
+    const { data: descs } = await supabase.from('produccion_descuentos_mp').select('*').eq('produccion_id', prod.id)
     const gruposConItems = []
     for (const g of grupos || []) {
       const { data: items } = await supabase.from('produccion_items').select('*').eq('grupo_id', g.id)
@@ -1945,7 +2017,7 @@ function Produccion({ puede, onVolver }) {
         const { data: lotes } = await supabase.from('produccion_lotes_mp').select('*').eq('produccion_item_id', it.id)
         itemsConLotes.push({ ...it, lotes: lotes || [] })
       }
-      gruposConItems.push({ ...g, items: itemsConLotes })
+      gruposConItems.push({ ...g, items: itemsConLotes, descuentos: (descs || []).filter(d => d.grupo_id === g.id) })
     }
     setDetalleGrupos(gruposConItems)
     setDetalle(prod)
@@ -1996,6 +2068,17 @@ function Produccion({ puede, onVolver }) {
                     ))}
                   </div>
                 ))}
+                {g.descuentos && g.descuentos.length > 0 && (
+                  <div style={{ background: '#fff', borderRadius: 7, padding: 12, marginBottom: 8, border: '1px dashed #F0DFB8' }}>
+                    <div style={{ fontSize: 10, color: '#9A8E85', fontWeight: 600, marginBottom: 6 }}>⚖️ DESCONTADO DE LA MATERIA PRIMA POR SUBPRODUCTO / RECORTE / SOBRANTE / MERMA</div>
+                    {g.descuentos.map((d, k) => (
+                      <div key={k} style={{ fontSize: 11, display: 'flex', justifyContent: 'space-between', color: '#9A8E85' }}>
+                        <span>{d.nombre_insumo}</span>
+                        <span style={{ fontFamily: 'monospace' }}>{d.codigo_lote} — {d.cantidad} {d.unidad}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
             {detalle.observaciones && <div style={{ fontSize: 12, color: '#9A8E85', marginTop: 8 }}><b>Observaciones:</b> {detalle.observaciones}</div>}

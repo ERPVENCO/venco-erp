@@ -3,6 +3,10 @@ import ModalEliminar from './ModalEliminar'
 import EscanerCodigoBarras from './EscanerCodigoBarras'
 import { supabase } from './supabase'
 
+// supabase-js NO lanza excepción cuando algo falla: devuelve { error }.
+// Con este helper los fallos dejan de pasar en silencio.
+const ok = (res) => { if (res.error) throw new Error(res.error.message); return res.data }
+
 export default function ProductoTerminado() {
   const [productos, setProductos] = useState([])
   const [materiasPrimas, setMateriasPrimas] = useState([])
@@ -160,74 +164,114 @@ export default function ProductoTerminado() {
     if (!nuevo.nombre) { alert('El nombre es obligatorio'); return }
     if (!nuevo.precio_kg) { alert('El precio 1 es obligatorio'); return }
     if (!nuevo.familia) { alert('La familia es obligatoria'); return }
+    if (guardando) return
+
+    // Cambiar la cantidad a mano NO ajusta los lotes: el stock y los lotes dejan de cuadrar
+    const stockNuevo = parseFloat(nuevo.stock_actual) || 0
+    const cambioStock = !!editando && stockNuevo !== (parseFloat(editando.stock_actual) || 0)
+    if (cambioStock && !window.confirm(
+      `Cambiaste el stock de ${editando.stock_actual} a ${stockNuevo}.\n\n` +
+      'Esto NO modifica los lotes y el inventario puede quedar desfasado (las ventas descuentan de los lotes).\n' +
+      'Para sumar producto usa Manufactura (Producción); para corregirlo bien, pídeme un ajuste por lote.\n\n¿Guardar de todos modos?'
+    )) return
+
     setGuardando(true)
 
-    // Al crear, valida que el código no exista. Al editar, el código no cambia.
-    if (!editando) {
-      const { data: existe } = await supabase
-        .from('productos').select('id').eq('codigo_manual', nuevo.codigo_manual)
-      if (existe?.length > 0) {
-        alert('Ese código ya existe. Por favor usa uno diferente.')
-        setGuardando(false)
-        return
+    try {
+      // Al crear, valida que el código no exista. Al editar, el código no cambia.
+      if (!editando) {
+        const existe = ok(await supabase
+          .from('productos').select('id').eq('codigo_manual', nuevo.codigo_manual))
+        if (existe?.length > 0) {
+          alert('Ese código ya existe. Por favor usa uno diferente.')
+          setGuardando(false)
+          return
+        }
       }
-    }
 
-    if (nuevo.codigo_barras) {
-      let queryBarras = supabase.from('productos').select('id').eq('codigo_barras', nuevo.codigo_barras)
-      if (editando) queryBarras = queryBarras.neq('id', editando.id)
-      const { data: existeBarras } = await queryBarras
-      if (existeBarras?.length > 0) {
-        alert('Ese código de barras ya está asignado a otro producto.')
-        setGuardando(false)
-        return
+      if (nuevo.codigo_barras) {
+        let queryBarras = supabase.from('productos').select('id').eq('codigo_barras', nuevo.codigo_barras)
+        if (editando) queryBarras = queryBarras.neq('id', editando.id)
+        const existeBarras = ok(await queryBarras)
+        if (existeBarras?.length > 0) {
+          alert('Ese código de barras ya está asignado a otro producto.')
+          setGuardando(false)
+          return
+        }
       }
-    }
 
-    const foto_url = fotoArchivo ? await subirFoto(nuevo.codigo_manual) : (fotoUrlActual || null)
+      const foto_url = fotoArchivo ? await subirFoto(nuevo.codigo_manual) : (fotoUrlActual || null)
 
-    const payload = {
-      codigo: nuevo.codigo_manual,
-      codigo_manual: nuevo.codigo_manual,
-      nombre: nuevo.nombre,
-      familia: nuevo.familia.toUpperCase(),
-      descripcion: nuevo.descripcion,
-      presentacion: nuevo.presentacion,
-      categoria: 'producto_terminado',
-      tipo_inventario: 'producto_terminado',
-      precio_kg: parseFloat(nuevo.precio_kg) || 0,
-      precio2: parseFloat(nuevo.precio2) || 0,
-      precio3: parseFloat(nuevo.precio3) || 0,
-      precio4: parseFloat(nuevo.precio4) || 0,
-      precio5: parseFloat(nuevo.precio5) || 0,
-      stock_actual: parseFloat(nuevo.stock_actual) || 0,
-      stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
-      unidad: nuevo.presentacion,
-      fecha_caducidad: nuevo.fecha_caducidad || null,
-      informacion_adicional: nuevo.informacion_adicional,
-      foto_url,
-      receta_tipo: nuevo.receta_tipo,
-      codigo_barras: nuevo.codigo_barras || null,
-    }
+      const payload = {
+        codigo: nuevo.codigo_manual,
+        codigo_manual: nuevo.codigo_manual,
+        nombre: nuevo.nombre,
+        familia: nuevo.familia.toUpperCase(),
+        descripcion: nuevo.descripcion,
+        presentacion: nuevo.presentacion,
+        categoria: 'producto_terminado',
+        tipo_inventario: 'producto_terminado',
+        precio_kg: parseFloat(nuevo.precio_kg) || 0,
+        precio2: parseFloat(nuevo.precio2) || 0,
+        precio3: parseFloat(nuevo.precio3) || 0,
+        precio4: parseFloat(nuevo.precio4) || 0,
+        precio5: parseFloat(nuevo.precio5) || 0,
+        stock_minimo: parseFloat(nuevo.stock_minimo) || 0,
+        unidad: nuevo.presentacion,
+        fecha_caducidad: nuevo.fecha_caducidad || null,
+        informacion_adicional: nuevo.informacion_adicional,
+        foto_url,
+        receta_tipo: nuevo.receta_tipo,
+        codigo_barras: nuevo.codigo_barras || null,
+      }
 
-    let productoId = editando?.id
+      let productoId = editando?.id
 
-    if (editando) {
-      const { error } = await supabase.from('productos').update(payload).eq('id', editando.id)
-      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
-      // Reemplaza los ingredientes: borra los anteriores y vuelve a insertar los actuales
-      await supabase.from('producto_ingredientes').delete().eq('producto_id', editando.id)
-    } else {
-      const { data, error } = await supabase.from('productos').insert([payload]).select()
-      if (error) { alert('Error: ' + error.message); setGuardando(false); return }
-      productoId = data?.[0]?.id
-    }
+      if (editando) {
+        // IMPORTANTE: el stock solo se envía si el usuario lo cambió a propósito.
+        // Antes se reescribía siempre con el valor cargado al abrir el formulario, así que
+        // editar un precio o un nombre pisaba las ventas/producciones hechas mientras tanto.
+        if (cambioStock) payload.stock_actual = stockNuevo
+        ok(await supabase.from('productos').update(payload).eq('id', editando.id))
 
-    if (nuevo.receta_tipo === 'fija' && ingredientes.length > 0 && productoId) {
-      const items = ingredientes
-        .filter(i => i.materia_prima_id && i.cantidad)
-        .map(i => ({ producto_id: productoId, materia_prima_id: i.materia_prima_id, cantidad: parseFloat(i.cantidad), unidad: i.unidad }))
-      if (items.length > 0) await supabase.from('producto_ingredientes').insert(items)
+        if (cambioStock) {
+          const { data: { user } } = await supabase.auth.getUser()
+          await supabase.from('auditoria').insert([{
+            tabla: 'productos', accion: 'EDICIÓN',
+            descripcion: `${editando.codigo} — ${editando.nombre} — Stock: ${editando.stock_actual} → ${stockNuevo} (manual)`,
+            datos_anteriores: editando, usuario_email: user?.email || 'desconocido', fecha: new Date().toISOString()
+          }])
+        }
+
+        // Reemplaza los ingredientes: borra los anteriores y vuelve a insertar los actuales
+        ok(await supabase.from('producto_ingredientes').delete().eq('producto_id', editando.id))
+      } else {
+        const stockInicial = parseFloat(nuevo.stock_actual) || 0
+        const creado = ok(await supabase.from('productos').insert([{ ...payload, stock_actual: stockInicial }]).select())
+        productoId = creado?.[0]?.id
+
+        // La cantidad inicial queda respaldada por un lote; sin lote, las ventas no pueden usarla
+        if (stockInicial > 0 && productoId) {
+          const { error: errLote } = await supabase.from('lotes').insert([{
+            producto_id: productoId, codigo_lote: `INI-${nuevo.codigo_manual}`,
+            cantidad_inicial: stockInicial, cantidad_actual: stockInicial,
+            fecha_ingreso: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10),
+            fecha_vencimiento: nuevo.fecha_caducidad || null
+          }])
+          if (errLote) alert(`El producto se creó, pero no se pudo crear su lote inicial (${errLote.message}). Su stock no será utilizable en ventas hasta que lo registres por una producción.`)
+        }
+      }
+
+      if (nuevo.receta_tipo === 'fija' && ingredientes.length > 0 && productoId) {
+        const items = ingredientes
+          .filter(i => i.materia_prima_id && i.cantidad)
+          .map(i => ({ producto_id: productoId, materia_prima_id: i.materia_prima_id, cantidad: parseFloat(i.cantidad), unidad: i.unidad }))
+        if (items.length > 0) ok(await supabase.from('producto_ingredientes').insert(items))
+      }
+    } catch (e) {
+      alert('Error: ' + e.message)
+      setGuardando(false)
+      return
     }
 
     cerrarForm()
@@ -300,7 +344,7 @@ export default function ProductoTerminado() {
               <div>
                 <span style={{ color: '#9A8E85', fontSize: 11 }}>PRECIOS</span><br/>
                 {[productoDetalle.precio_kg, productoDetalle.precio2, productoDetalle.precio3, productoDetalle.precio4, productoDetalle.precio5]
-                  .map((pr, i) => pr ? `P${i + 1}: $${pr.toLocaleString()}` : null)
+                  .map((pr, i) => pr ? `P${i + 1}: $${pr.toLocaleString('es-CO')}` : null)
                   .filter(Boolean).join('   ·   ') || '—'}
               </div>
               <div><span style={{ color: '#9A8E85', fontSize: 11 }}>STOCK</span><br/>{productoDetalle.stock_actual} (mínimo: {productoDetalle.stock_minimo})</div>
@@ -457,6 +501,9 @@ export default function ProductoTerminado() {
               <div>
                 <label style={lbl}>STOCK {editando ? 'ACTUAL' : 'INICIAL'}</label>
                 <input type="number" value={nuevo.stock_actual} onChange={e => setNuevo({...nuevo, stock_actual: e.target.value})} placeholder="0" style={inp} />
+                {editando
+                  ? <div style={{ fontSize: 10, color: '#C07D00', marginTop: 3 }}>⚠️ Cambiarlo aquí no ajusta los lotes. Para sumar producto usa Producción.</div>
+                  : <div style={{ fontSize: 10, color: '#9A8E85', marginTop: 3 }}>Si pones una cantidad, se crea un lote inicial para poder venderla.</div>}
               </div>
               <div>
                 <label style={lbl}>STOCK MÍNIMO</label>
@@ -574,9 +621,9 @@ export default function ProductoTerminado() {
                         <span style={{ background: '#FCEAEA', color: '#B22222', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600 }}>{p.familia}</span>
                       </td>
                       <td style={{ padding: '11px 16px', fontSize: 13, whiteSpace: 'nowrap' }}>{p.presentacion}</td>
-                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>${p.precio_kg?.toLocaleString()}</td>
-                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.precio2 ? '$' + p.precio2?.toLocaleString() : '—'}</td>
-                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.precio3 ? '$' + p.precio3?.toLocaleString() : '—'}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>${p.precio_kg?.toLocaleString('es-CO')}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.precio2 ? '$' + p.precio2?.toLocaleString('es-CO') : '—'}</td>
+                      <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.precio3 ? '$' + p.precio3?.toLocaleString('es-CO') : '—'}</td>
                       <td style={{ padding: '11px 16px', fontSize: 13, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{p.stock_actual}</td>
                       <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
                         <span style={{ background: p.receta_tipo === 'libre' ? '#E8F0FB' : '#F0ECE5', color: p.receta_tipo === 'libre' ? '#1A5FA8' : '#5A4F47', padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500 }}>

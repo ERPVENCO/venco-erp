@@ -119,7 +119,6 @@ export default function Ventas() {
   const eliminandoRef = useRef(false)
   const guardandoRef = useRef(false)
   const addBackRef = useRef({})      // lote_id -> cantidad que la venta en edición ya había consumido
-  const revertidoRef = useRef(false) // true si al editar ya se revirtió lo anterior (para no revertir dos veces)
   useEffect(() => { itemsRef.current = items }, [items])
 
   useEffect(() => { cargar(); cargarClientes(); cargarProductos(); cargarVendedores() }, [])
@@ -155,19 +154,21 @@ export default function Ventas() {
     setVendedores(data || [])
   }
 
+  const siguienteFolioGuia = async () => {
+    const { data } = await supabase.from('trazabilidad_despacho').select('folio').not('folio', 'is', null).order('folio', { ascending: false }).limit(1)
+    if (!data || data.length === 0) return 'GUI-0001'
+    const numero = parseInt(data[0].folio.replace('GUI-', '')) + 1
+    return `GUI-${String(numero).padStart(4, '0')}`
+  }
+
+  // El folio de ventas/remisiones ahora lo genera guardar_venta dentro de la base (con candado);
+  // este helper solo lo usa facturarRemision, que cambia el folio de una remisión a factura.
   const siguienteFolio = async (tipo) => {
     const prefijo = tipo === 'remision' ? 'REM' : 'FAC'
     const { data } = await supabase.from('ventas').select('folio').like('folio', `${prefijo}%`).order('folio', { ascending: false }).limit(1)
     if (!data || data.length === 0) return `${prefijo}-0001`
     const numero = parseInt(data[0].folio.replace(`${prefijo}-`, '')) + 1
     return `${prefijo}-${String(numero).padStart(4, '0')}`
-  }
-
-  const siguienteFolioGuia = async () => {
-    const { data } = await supabase.from('trazabilidad_despacho').select('folio').not('folio', 'is', null).order('folio', { ascending: false }).limit(1)
-    if (!data || data.length === 0) return 'GUI-0001'
-    const numero = parseInt(data[0].folio.replace('GUI-', '')) + 1
-    return `GUI-${String(numero).padStart(4, '0')}`
   }
 
   // ── Lotes por item (FIFO automático, editable) ──
@@ -327,7 +328,6 @@ export default function Ventas() {
     setEditandoId(null)
     setVentaOriginal(null)
     addBackRef.current = {}
-    revertidoRef.current = false
     setItems([])
     setVenta(ventaVacia())
     setMostrarForm(true)
@@ -339,16 +339,11 @@ export default function Ventas() {
     setEditandoId(null)
     setVentaOriginal(null)
     addBackRef.current = {}
-    revertidoRef.current = false
     setVenta(ventaVacia())
   }
 
-  const cancelarFormulario = () => {
-    if (editandoId && revertidoRef.current &&
-        !window.confirm('Esta venta ya fue revertida del inventario. Si cancelas ahora quedará sin ítems. ¿Cancelar de todos modos?')) return
-    cerrarFormulario()
-    if (revertidoRef.current) { cargar(); cargarProductos() }
-  }
+  // Guardar es todo-o-nada (guardar_venta): si se cancela, la venta original sigue intacta
+  const cancelarFormulario = () => cerrarFormulario()
 
   // NUEVO: cuenta los abonos (ingresos) registrados contra una venta a crédito
   const contarAbonos = async (ventaId) => {
@@ -404,7 +399,6 @@ export default function Ventas() {
     const addBack = {}
     ;(lotesOrig || []).forEach(l => { addBack[l.lote_id] = (addBack[l.lote_id] || 0) + (parseFloat(l.cantidad_usada) || 0) })
     addBackRef.current = addBack
-    revertidoRef.current = false
 
     const vendedorEncontrado = vendedores.find(ve => ve.nombre === v.vendedor)
 
@@ -447,26 +441,10 @@ export default function Ventas() {
     setMostrarForm(true)
   }
 
-  // ── Revertir efectos de una venta (stock, lotes, saldo cliente, ingreso) ──
-  // Usa las funciones SQL ajustar_lote / ajustar_stock (una petición cada una) y
-  // lanza error si algo falla, en vez de seguir como si nada.
-  const revertirVenta = async (v, itemsVenta) => {
-    for (const item of itemsVenta) {
-      const { data: lotesItem } = await supabase.from('venta_item_lotes').select('*').eq('venta_item_id', item.id)
-      for (const li of lotesItem || []) {
-        ok(await supabase.rpc('ajustar_lote', { p_lote: li.lote_id, p_delta: parseFloat(li.cantidad_usada) }))
-      }
-      ok(await supabase.rpc('ajustar_stock', { p_producto: item.producto_id, p_delta: parseFloat(item.cantidad) }))
-    }
-    if (v.estado === 'credito') {
-      const { data: cliente } = await supabase.from('clientes').select('saldo_pendiente').eq('id', v.cliente_id).single()
-      if (cliente) ok(await supabase.from('clientes').update({ saldo_pendiente: Math.max(0, (cliente.saldo_pendiente || 0) - v.total) }).eq('id', v.cliente_id))
-    }
-    ok(await supabase.from('ingresos').delete().eq('venta_id', v.id))
-    ok(await supabase.from('venta_items').delete().eq('venta_id', v.id)) // cascade elimina venta_item_lotes
-  }
-
   // ── Guardar (crea o actualiza) ──
+  // Todo el trabajo (folio, encabezado, ítems, lotes, stock, ingreso, saldo del cliente y,
+  // en edición, la reversión de lo anterior) lo hace la función SQL guardar_venta en UNA
+  // transacción: si algo falla no queda nada a medias, y el formulario sigue abierto para corregir.
   const guardar = async () => {
     if (!venta.cliente_id) { alert('Selecciona un cliente'); return }
     if (items.length === 0) { alert('Agrega al menos un producto'); return }
@@ -494,127 +472,52 @@ export default function Ventas() {
     const estado = venta.tipo === 'remision' ? 'pendiente' : venta.estado
     const metodo_pago = (estado === 'credito' || venta.tipo === 'remision') ? null : venta.metodo_pago
 
-    let ventaId = null
-    let folio = ''
-    let fase = 'preparando'
-    const esNueva = !editandoId
-
     try {
-      // 1. Validación contra la base: lo que esta venta pide de CADA lote (sumando todos sus ítems)
-      const add = revertidoRef.current ? {} : addBackRef.current
-      const porLote = {}
-      for (const item of items) for (const lu of item.lotes_usados) {
-        porLote[lu.lote_id] = (porLote[lu.lote_id] || 0) + (parseFloat(lu.cantidad_usada) || 0)
-      }
-      const idsLotes = Object.keys(porLote)
-      if (idsLotes.length) {
-        const frescos = ok(await supabase.from('lotes').select('id, codigo_lote, cantidad_actual').in('id', idsLotes)) || []
-        for (const l of frescos) {
-          const real = (parseFloat(l.cantidad_actual) || 0) + (add[l.id] || 0)
-          if (porLote[l.id] > real + 0.0001) {
-            throw new Error(`El lote ${l.codigo_lote} no alcanza: esta venta usa ${porLote[l.id]} y hay ${real}.`)
-          }
-        }
-      }
-
       const { data: { user } } = await supabase.auth.getUser()
 
-      // 2. Edición: revertir lo anterior (una sola vez, aunque se reintente el guardado)
-      if (editandoId && !revertidoRef.current) {
-        await revertirVenta(ventaOriginal.venta, ventaOriginal.items)
-        revertidoRef.current = true
-        addBackRef.current = {}
+      const cab = {
+        tipo: venta.tipo,
+        estado,
+        cliente_id: venta.cliente_id,
+        cliente_nombre: cliente?.empresa || '',
+        metodo_pago,
+        tipo_cuenta: venta.tipo_cuenta || null,
+        vendedor: vendedor_nombre,
+        comision_porcentaje: comision_porcentaje || 0,
+        comision_valor,
+        subtotal, descuento, iva, total,
+        observaciones: venta.observaciones,
+        fecha_vencimiento: venta.fecha_vencimiento || null,
+        creado_en: timestampDeVenta(venta.fecha, editandoId ? ventaOriginal.venta.creado_en : null),
+        usuario_email: user?.email || null
       }
 
-      // 3. Encabezado
-      if (editandoId) {
-        folio = ventaOriginal.venta.folio
-        ventaId = editandoId
-        ok(await supabase.from('ventas').update({
-          tipo: venta.tipo,
-          estado,
-          cliente_id: venta.cliente_id,
-          cliente_nombre: cliente?.empresa || '',
-          metodo_pago,
-          tipo_cuenta: venta.tipo_cuenta || null,
-          vendedor: vendedor_nombre,
-          comision_porcentaje: comision_porcentaje || 0,
-          comision_valor,
-          subtotal, descuento, iva, total,
-          observaciones: venta.observaciones,
-          fecha_vencimiento: venta.fecha_vencimiento || null,
-          creado_en: timestampDeVenta(venta.fecha, ventaOriginal.venta.creado_en)
-        }).eq('id', ventaId))
-      } else {
-        folio = await siguienteFolio(venta.tipo)
-        const data = ok(await supabase.from('ventas').insert([{
-          folio, tipo: venta.tipo, estado,
-          cliente_id: venta.cliente_id, cliente_nombre: cliente?.empresa || '',
-          metodo_pago, tipo_cuenta: venta.tipo_cuenta || null,
-          vendedor: vendedor_nombre, comision_porcentaje: comision_porcentaje || 0, comision_valor,
-          subtotal, descuento, iva, total,
-          observaciones: venta.observaciones, fecha_vencimiento: venta.fecha_vencimiento || null,
-          usuario_email: user?.email,
-          creado_en: timestampDeVenta(venta.fecha, null)
-        }]).select())
-        ventaId = data[0].id
-      }
+      const itemsPayload = items.map(item => ({
+        producto_id: item.producto_id,
+        nombre_producto: item.nombre_producto,
+        codigo_producto: item.codigo_producto,
+        cantidad: parseFloat(item.cantidad),
+        unidad: item.unidad,
+        precio_unitario: parseFloat(item.precio_unitario),
+        subtotal: item.subtotal,
+        lotes: item.lotes_usados.map(lu => ({
+          lote_id: lu.lote_id,
+          codigo_lote: lu.codigo_lote,
+          cantidad_usada: parseFloat(lu.cantidad_usada)
+        }))
+      }))
 
-      // 4. Ítems y sus lotes (aún sin tocar el inventario)
-      const filasLotes = []
-      const consumoLote = {}
-      const consumoStock = {}
-      for (const item of items) {
-        const itemData = ok(await supabase.from('venta_items').insert([{
-          venta_id: ventaId,
-          producto_id: item.producto_id,
-          nombre_producto: item.nombre_producto,
-          codigo_producto: item.codigo_producto,
-          cantidad: parseFloat(item.cantidad),
-          unidad: item.unidad,
-          precio_unitario: parseFloat(item.precio_unitario),
-          subtotal: item.subtotal
-        }]).select())
-        const itemId = itemData[0].id
-
-        for (const lu of item.lotes_usados) {
-          const cant = parseFloat(lu.cantidad_usada)
-          filasLotes.push({ venta_item_id: itemId, lote_id: lu.lote_id, codigo_lote: lu.codigo_lote, cantidad_usada: cant, unidad: item.unidad })
-          consumoLote[lu.lote_id] = (consumoLote[lu.lote_id] || 0) + cant
-        }
-        consumoStock[item.producto_id] = (consumoStock[item.producto_id] || 0) + parseFloat(item.cantidad)
-      }
-      if (filasLotes.length) ok(await supabase.from('venta_item_lotes').insert(filasLotes))
-
-      // 5. Inventario, ingreso y saldo del cliente
-      fase = 'inventario'
-      const res = await Promise.all([
-        ...Object.entries(consumoLote).map(([id, c]) => supabase.rpc('ajustar_lote', { p_lote: id, p_delta: -c })),
-        ...Object.entries(consumoStock).map(([id, c]) => supabase.rpc('ajustar_stock', { p_producto: id, p_delta: -c }))
-      ])
-      res.forEach(ok)
-
-      if (venta.tipo === 'venta' && estado === 'contado') {
-        ok(await supabase.from('ingresos').insert([{
-          venta_id: ventaId,
-          concepto: `Venta ${folio} — ${cliente?.empresa}`,
-          metodo_pago: venta.metodo_pago,
-          monto: total
-        }]))
-      }
-
-      if (estado === 'credito') {
-        const { data: clienteActual } = await supabase.from('clientes').select('saldo_pendiente').eq('id', venta.cliente_id).single()
-        ok(await supabase.from('clientes').update({
-          saldo_pendiente: (clienteActual?.saldo_pendiente || 0) + total
-        }).eq('id', venta.cliente_id))
-      }
+      const res = ok(await supabase.rpc('guardar_venta', {
+        p_venta: editandoId || null,
+        p_cab: cab,
+        p_items: itemsPayload
+      }))
 
       if (editandoId) {
         await supabase.from('auditoria').insert([{
           tabla: 'ventas',
           accion: 'EDICIÓN',
-          descripcion: `${folio} — ${cliente?.empresa} — Total nuevo: $${total.toLocaleString()} (Total anterior: $${ventaOriginal.venta.total?.toLocaleString()})`,
+          descripcion: `${res?.folio || ventaOriginal.venta.folio} — ${cliente?.empresa} — Total nuevo: $${total.toLocaleString()} (Total anterior: $${ventaOriginal.venta.total?.toLocaleString()})`,
           datos_anteriores: ventaOriginal.venta,
           usuario_email: user?.email || 'desconocido',
           fecha: new Date().toISOString()
@@ -625,23 +528,7 @@ export default function Ventas() {
       cargar()
       cargarProductos()
     } catch (e) {
-      let extra = ''
-      if (fase !== 'inventario' && ventaId && esNueva) {
-        // Aún no se tocó el inventario: se deshace lo creado
-        try {
-          ok(await supabase.from('venta_items').delete().eq('venta_id', ventaId))
-          ok(await supabase.from('ventas').delete().eq('id', ventaId))
-          extra = '\nSe deshizo lo que alcanzó a guardarse.'
-        } catch (e2) {
-          extra = `\nNo se pudo deshacer automáticamente (${e2.message}). Revisa ${folio}.`
-        }
-      } else if (fase === 'inventario') {
-        extra = '\nAlgunos movimientos (inventario, ingreso o saldo del cliente) pudieron aplicarse: revisa antes de reintentar.'
-      }
-      if (editandoId && revertidoRef.current) {
-        extra += `\n⚠️ ${folio} ya fue revertida del inventario: NO cierres este formulario; corrige y vuelve a guardar.`
-      }
-      alert(`Error al guardar${folio ? ' ' + folio : ''}: ${e.message}${extra}`)
+      alert(`Error al guardar: ${e.message}\nNo se modificó nada. Corrige y vuelve a intentar.`)
     } finally {
       guardandoRef.current = false
       setGuardando(false)
@@ -699,6 +586,9 @@ export default function Ventas() {
   }
 
   // ── Eliminar con reversión ──
+  // La reversión (lotes, stock, saldo del cliente, ingresos) y el borrado ocurren en UNA
+  // transacción dentro de la base (eliminar_venta): un segundo intento simultáneo no puede
+  // revertir dos veces, y si algo falla no se modifica nada.
   const eliminarVenta = async () => {
     if (eliminandoRef.current) return // ignora el 2º clic
     eliminandoRef.current = true
@@ -710,9 +600,7 @@ export default function Ventas() {
         if (abonos > 0 && !window.confirm(`${v.folio} tiene ${abonos} abono(s) registrado(s).\nAl eliminarla también se borrarán esos cobros (dejarán de aparecer en Ingresos y en los saldos por cuenta).\n¿Eliminar de todas formas?`)) return
       }
 
-      const { data: itemsVenta } = await supabase.from('venta_items').select('*').eq('venta_id', v.id)
-      await revertirVenta(v, itemsVenta || [])
-      ok(await supabase.from('ventas').delete().eq('id', v.id))
+      ok(await supabase.rpc('eliminar_venta', { p_venta: v.id }))
 
       const { data: { user } } = await supabase.auth.getUser()
       await supabase.from('auditoria').insert([{
@@ -724,7 +612,7 @@ export default function Ventas() {
         fecha: new Date().toISOString()
       }])
     } catch (e) {
-      alert(`No se pudo eliminar ${v.folio}: ${e.message}\nRevisa la venta antes de reintentar.`)
+      alert(`No se pudo eliminar ${v.folio}: ${e.message}\nNo se modificó nada.`)
     } finally {
       eliminandoRef.current = false
       setVentaAEliminar(null)

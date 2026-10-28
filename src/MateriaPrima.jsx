@@ -170,7 +170,7 @@ export default function MateriaPrima() {
           const { error: errLote } = await supabase.from('lotes').insert([{
             producto_id: creado[0].id, codigo_lote: `INI-${codigo}`,
             cantidad_inicial: stockInicial, cantidad_actual: stockInicial,
-            fecha_ingreso: new Date().toISOString().split('T')[0],
+            fecha_ingreso: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10),
             fecha_vencimiento: nuevo.fecha_caducidad || null
           }])
           if (errLote) alert(`El insumo se creó, pero no se pudo crear su lote inicial (${errLote.message}). Su cantidad no será utilizable hasta que lo hagas por una compra.`)
